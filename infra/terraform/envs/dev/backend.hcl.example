@@ -1,0 +1,2 @@
+bucket = "NOME_DO_BUCKET_CRIADO_NO_BOOTSTRAP"
+region = "us-east-1"

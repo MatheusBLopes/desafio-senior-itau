@@ -1,0 +1,3 @@
+owner       = "seu-nome"
+alert_email = "voce@exemplo.com"
+image_tag   = "COLE_A_TAG_GERADA_PELO_BUILD_PUSH"
