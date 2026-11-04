@@ -10,6 +10,9 @@ dependencies = [
     "asyncpg==0.30.0",
     "orjson==3.11.3",
     "prometheus-client==0.23.1",
+    "pyjwt[crypto]==2.15.1",
+    "boto3==1.43.123",
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +33,6 @@ dev = [
     "pytest==8.4.2",
     "pytest-asyncio==1.2.0",
     "testcontainers[postgres]==4.13.1",
-    "httpx==0.28.1",
     "websockets==15.0.1",
 ]
 

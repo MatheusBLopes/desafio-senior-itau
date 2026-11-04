@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 import asyncpg
+import orjson
 from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
@@ -20,20 +21,20 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from . import db
+from .auth import (Authenticator, CognitoConfig, CognitoIdentityProvider, HttpJwks, JwtVerifier,
+                   validate_credentials)
 from .auctions import AuctionRepository, AuctionService, AuctionStateLoader, CreateAuctionRequest
 from .bids import BidRepository, BidService, ClientIpRateLimiter, RateLimiter, client_ip, parse_amount
 from .common import ApiError, RedisClock, json_response
 from .config import Settings
 from .lua import LuaScripts
-from .observability import REQUESTS_SHED, Metrics, configure_logging, export_emf, log_context
+from .observability import REQUESTS_SHED, Metrics, bind, configure_logging, export_emf, log_context
 from .persistence import BidPersister, BidStreamConsumer
 from .realtime import AuctionEventListener, LiveAuctionCache, SnapshotBroadcaster
 from .scheduler import AuctionCloser, AuctionReconciler
 
 log = logging.getLogger(__name__)
 
-# Sem ':' no userId: ele compõe a chave idem:{auction}:<user>:<key> e não pode gerar ambiguidade.
-USER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 MANAGEMENT_PATHS = {"/metrics", "/health"}
@@ -61,6 +62,7 @@ class Container:
     consumer: BidStreamConsumer
     closer: AuctionCloser
     reconciler: AuctionReconciler
+    auth: Authenticator
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
 
 
@@ -82,6 +84,18 @@ def create_pubsub_redis(s: Settings) -> Redis:
     kwargs: dict[str, Any] = {"ssl": True} if s.redis_tls else {}
     return Redis(host=s.redis_host, port=s.redis_port, decode_responses=True, socket_timeout=None,
                  health_check_interval=15, **kwargs)
+
+
+def create_authenticator(s: Settings) -> Authenticator:
+    if s.auth_mode != "cognito":
+        log.warning("AUTH_MODE=%s: o usuário vem do X-User-Id, sem autenticação. Só para desenvolvimento.",
+                    s.auth_mode)
+        return Authenticator(s.auth_mode)
+    if not s.cognito_user_pool_id or not s.cognito_client_id:
+        raise RuntimeError("AUTH_MODE=cognito exige COGNITO_USER_POOL_ID e COGNITO_CLIENT_ID")
+    config = CognitoConfig(s.cognito_region, s.cognito_user_pool_id, s.cognito_client_id)
+    verifier = JwtVerifier(config.issuer, config.client_id, HttpJwks(config.jwks_url))
+    return Authenticator("cognito", verifier, CognitoIdentityProvider(config))
 
 
 async def build(s: Settings) -> Container:
@@ -108,6 +122,7 @@ async def build(s: Settings) -> Container:
         consumer=consumer,
         closer=AuctionCloser(redis, scripts, loader, clock, s),
         reconciler=AuctionReconciler(auction_repo, loader, s),
+        auth=create_authenticator(s),
     )
 
 
@@ -176,7 +191,7 @@ class PortSeparation:
     """Métricas e health detalhado só na porta interna; a API só na pública (o ALB vê só a 8080).
 
     Middleware ASGI puro (sem BaseHTTPMiddleware): vale para HTTP e WebSocket e custa quase nada.
-    Também zera o contexto de log a cada requisição e registra o userId nele.
+    Também zera o contexto de log a cada requisição; o userId entra nele só depois de autenticado.
     """
 
     def __init__(self, app: Any):
@@ -190,11 +205,7 @@ class PortSeparation:
             if scope["type"] == "websocket":
                 return await send({"type": "websocket.close", "code": 1008})
             return await json_response({"code": "NOT_FOUND", "message": "não encontrado"}, 404)(scope, receive, send)
-        context = {}
-        for name, value in scope["headers"]:
-            if name == b"x-user-id" and len(value) <= 64:
-                context["userId"] = value.decode("latin-1")
-        log_context.set(context)
+        log_context.set({})
         return await self.app(scope, receive, send)
 
 
@@ -278,9 +289,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- Leilões ---------------------------------------------------------------------------------
 
+    # --- Autenticação ------------------------------------------------------------------------------
+
+    @app.post("/auth/signup")
+    async def signup(request: Request) -> Response:
+        """Cria o usuário no Cognito já confirmado (sem e-mail). Limitado por IP contra cadastro em massa."""
+        c = container(request)
+        c.ip_limiter.check(client_ip(request.client.host if request.client else None,
+                                     request.headers.get("x-forwarded-for")))
+        username, password = validate_credentials(await _json(request))
+        await c.auth.identity_provider().sign_up(username, password)
+        return json_response({"username": username}, 201)
+
+    @app.post("/auth/login")
+    async def login(request: Request) -> Response:
+        """Troca usuário e senha por um access token do Cognito (JWT, 1 h)."""
+        c = container(request)
+        c.ip_limiter.check(client_ip(request.client.host if request.client else None,
+                                     request.headers.get("x-forwarded-for")))
+        username, password = validate_credentials(await _json(request))
+        return json_response(await c.auth.identity_provider().login(username, password))
+
+    # --- Leilões ---------------------------------------------------------------------------------
+
     @app.post("/auctions")
     async def create_auction(body: CreateAuctionRequest, request: Request) -> Response:
-        view = await container(request).auctions.create(body)
+        c = container(request)
+        if c.auth.mode == "cognito":
+            bind(userId=await c.auth.user_of(request.headers))
+        view = await c.auctions.create(body)
         return json_response(view, 201, {"Location": f"/auctions/{view['id']}"})
 
     @app.get("/auctions/{auction_id}")
@@ -297,14 +334,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Caminho quente: headers e corpo são lidos e validados aqui, sem a injeção de dependências.
         """
         headers = request.headers
-        user_id = headers.get("x-user-id") or ""
+        c = container(request)
+        user_id = await c.auth.user_of(headers)
+        bind(userId=user_id)
         key = headers.get("idempotency-key") or ""
-        if not USER_ID.match(user_id):
-            raise ApiError.bad_request("X-User-Id: use 1 a 64 caracteres [A-Za-z0-9_-]")
         if not IDEMPOTENCY_KEY.match(key):
             raise ApiError.bad_request("Idempotency-Key: use 1 a 128 caracteres [A-Za-z0-9_.:-]")
         amount = parse_amount(await request.body())
-        c = container(request)
         c.ip_limiter.check(client_ip(request.client.host if request.client else None,
                                      headers.get("x-forwarded-for")))
         result = await c.bids.place(auction_id, user_id, key, amount)
@@ -363,6 +399,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+async def _json(request: Request) -> object:
+    try:
+        return orjson.loads(await request.body())
+    except orjson.JSONDecodeError:
+        raise ApiError.bad_request("corpo JSON inválido") from None
 
 
 def configure(settings: Settings) -> None:

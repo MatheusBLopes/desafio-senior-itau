@@ -58,6 +58,12 @@ class Settings:
 
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
+    # cognito (AWS): JWT do Amazon Cognito. header (local, carga): X-User-Id sem prova de identidade.
+    auth_mode: str = "header"
+    cognito_region: str = "us-east-1"
+    cognito_user_pool_id: str = ""
+    cognito_client_id: str = ""
+
     json_logs: bool = False
     # Exporta as métricas de negócio para o CloudWatch (namespace Auction) via Embedded Metric Format.
     cloudwatch_emf: bool = False
@@ -82,5 +88,9 @@ class Settings:
                 per_ip_enabled=_bool("PER_IP_RATE_LIMIT_ENABLED", True),
             ),
             json_logs=_bool("JSON_LOGS", False),
+            auth_mode=_env("AUTH_MODE", "header"),
+            cognito_region=_env("AWS_REGION", "us-east-1"),
+            cognito_user_pool_id=_env("COGNITO_USER_POOL_ID", ""),
+            cognito_client_id=_env("COGNITO_CLIENT_ID", ""),
             cloudwatch_emf=_bool("CLOUDWATCH_EMF", False),
         )
