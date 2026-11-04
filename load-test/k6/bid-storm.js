@@ -2,6 +2,7 @@
 //
 //   docker run --rm -i --network host -v "$PWD/load-test/k6:/scripts" grafana/k6:1.3.0 run /scripts/bid-storm.js
 //   BASE_URL=http://<alb-dns> RATE=2000 DURATION=60s ... (variáveis opcionais, via -e)
+//   AUTH=cognito TOKEN_USERS=200 contra a AWS (lances com JWT do Cognito)
 //
 // Cada usuário virtual cobre o mínimo que conhece (+0 a 2 incrementos), como faria um cliente real
 // reagindo ao preço; 5% dos lances são reenviados com a mesma Idempotency-Key.
@@ -14,6 +15,10 @@ const BASE = __ENV.BASE_URL || 'http://localhost:8080';
 const RATE = Number(__ENV.RATE || 1000);
 const DURATION = __ENV.DURATION || '30s';
 const USERS = Number(__ENV.USERS || 50000);
+// AUTH=cognito (AWS): o setup cadastra TOKEN_USERS usuários e cada lance usa o access token de um deles.
+// Com o rate limit por usuário (10 lances/s), a taxa útil é no máximo ~TOKEN_USERS × 10/s.
+const AUTH = __ENV.AUTH || 'header';
+const TOKEN_USERS = Number(__ENV.TOKEN_USERS || 200);
 
 const accepted = new Counter('bids_accepted');
 const rejected = new Counter('bids_rejected');
@@ -22,6 +27,7 @@ const replayed = new Counter('bids_replayed');
 const shed = new Counter('bids_shed');
 
 export const options = {
+  setupTimeout: '5m',
   scenarios: {
     storm: {
       executor: 'constant-arrival-rate',
@@ -39,12 +45,37 @@ export const options = {
   },
 };
 
+function cognitoUsers() {
+  const suffix = uuidv4().slice(0, 8);
+  const tokens = [];
+  for (let start = 0; start < TOKEN_USERS; start += 10) {
+    const creds = [];
+    for (let i = start; i < Math.min(start + 10, TOKEN_USERS); i++) {
+      creds.push(JSON.stringify({ username: `k6-${suffix}-${i}`, password: `k6-${suffix}-pw1` }));
+    }
+    const json = { headers: { 'Content-Type': 'application/json' } };
+    http.batch(creds.map((c) => ['POST', `${BASE}/auth/signup`, c, json]));
+    const logins = http.batch(creds.map((c) => ['POST', `${BASE}/auth/login`, c, json]));
+    logins.forEach((r) => { if (r.status === 200) tokens.push(r.json('accessToken')); });
+  }
+  if (tokens.length === 0) throw new Error('nenhum usuário do Cognito conseguiu logar');
+  console.log(`${tokens.length} usuários do Cognito prontos`);
+  return tokens;
+}
+
+function identity(data, user) {
+  if (AUTH !== 'cognito') return { 'X-User-Id': user };
+  return { Authorization: `Bearer ${data.tokens[randomIntBetween(0, data.tokens.length - 1)]}` };
+}
+
 export function setup() {
+  const tokens = AUTH === 'cognito' ? cognitoUsers() : [];
+  const creator = AUTH === 'cognito' ? { Authorization: `Bearer ${tokens[0]}` } : {};
   const res = http.post(`${BASE}/auctions`, JSON.stringify({
     title: 'k6 storm', startingPrice: '100.00', minIncrement: '1.00',
     durationSeconds: 3600, antiSnipingWindowSeconds: 0, antiSnipingExtendSeconds: 0,
-  }), { headers: { 'Content-Type': 'application/json' } });
-  return { auctionId: res.json('id') };
+  }), { headers: { 'Content-Type': 'application/json', ...creator } });
+  return { auctionId: res.json('id'), tokens };
 }
 
 let known = 100.0;
@@ -54,7 +85,7 @@ export default function (data) {
   const key = uuidv4();
   const amount = (known + randomIntBetween(0, 2)).toFixed(2);
   const params = {
-    headers: { 'Content-Type': 'application/json', 'X-User-Id': user, 'Idempotency-Key': key },
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, ...identity(data, user) },
     tags: { name: 'bid' },
     // 409/422/429 são respostas de negócio esperadas; 503 é descarte por excesso de carga (contado à parte).
     responseCallback: http.expectedStatuses(200, 201, 409, 422, 429, 503),
