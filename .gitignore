@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Versão Java original: mantida localmente como referência, fora do repositório.
+bid-service-java/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+backend.hcl
+.terraform.lock.hcl.bak
+tfplan
+*.tfplan
+
+# IDE / SO
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Enunciado original (marcado como interno e com o nome de quem enviou); transcrito no README.
+WhatsApp Image *.jpeg
