@@ -197,6 +197,8 @@ async def test_bids_and_auction_creation_require_a_valid_token(server, http, cog
     created = await http.post("/auctions", json={
         "title": "x", "startingPrice": "100.00", "minIncrement": "1.00", "durationSeconds": 60})
     assert created.status_code == 401
+    # Sem token, nem o formato do corpo é revelado: 401 antes da validação.
+    assert (await http.post("/auctions", json={})).status_code == 401
 
     from .conftest import new_auction
     aid = await new_auction(server.c, 60)

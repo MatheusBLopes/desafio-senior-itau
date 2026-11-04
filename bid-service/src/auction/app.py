@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 import asyncpg
 import orjson
+from pydantic import ValidationError
 from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
@@ -343,10 +344,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- Leilões ---------------------------------------------------------------------------------
 
     @app.post("/auctions")
-    async def create_auction(body: CreateAuctionRequest, request: Request) -> Response:
+    async def create_auction(request: Request) -> Response:
+        # Autentica ANTES de validar o corpo: quem não tem token recebe 401, não o formato esperado do corpo.
         c = container(request)
         if c.auth.mode == "cognito":
             bind(userId=await c.auth.user_of(request.headers))
+        try:
+            body = CreateAuctionRequest.model_validate(await _json(request))
+        except ValidationError as e:
+            raise ApiError.bad_request("; ".join(f"{'.'.join(str(p) for p in err['loc']) or 'corpo'}: {err['msg']}"
+                                                 for err in e.errors())) from None
         view = await c.auctions.create(body)
         return json_response(view, 201, {"Location": f"/auctions/{view['id']}"})
 
