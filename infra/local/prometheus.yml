@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: bid-service
+    metrics_path: /metrics
+    # Uma entrada por réplica (DNS do Docker). Porta interna; o nginx (papel do ALB) só encaminha a 8080.
+    dns_sd_configs:
+      - names: ["app"]
+        type: A
+        port: 8081

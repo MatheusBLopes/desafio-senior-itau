@@ -1,0 +1,105 @@
+# Ambiente local: réplicas da app (2 por padrão) atrás de um nginx (papel do ALB), Valkey e Postgres.
+#   docker compose up --build                         → API em http://localhost:8080
+#   docker compose --profile observability up --build → + Prometheus (9090) e Grafana (3000)
+x-app: &app
+  image: desafio-itau/bid-service:local
+  environment:
+    DB_HOST: postgres
+    DB_USER: auction
+    DB_PASSWORD: auction
+    REDIS_HOST: valkey
+    JSON_LOGS: "true"
+    AUCTION_RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+    # O k6 roda de uma máquina só (um IP): desligar para o teste de carga.
+    PER_IP_RATE_LIMIT_ENABLED: ${PER_IP_RATE_LIMIT_ENABLED:-true}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  healthcheck:
+    # bash /dev/tcp, não python -c: iniciar um interpretador custa ~190 ms de CPU dentro do cgroup da
+    # task e, com APP_CPUS=0.5 (cota de 50 ms a cada 100 ms), travava o processo a cada check. No
+    # Fargate não há check dentro do container: o ALB checa /readyz pela rede.
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q UP <&3'"]
+    interval: 10s
+    timeout: 3s
+    retries: 30
+    start_period: 10s
+  ulimits:
+    nofile: 65535
+  # Memória da task do Fargate (1 GB). Um processo Python usa no máximo um núcleo.
+  mem_limit: 1g
+  # Medição de capacidade (load-test/capacity.sh): APP_CPUS=0.5 imita a task de 0,5 vCPU do Fargate, e
+  # SYSTEM_CPUSET prende o sistema a núcleos que o k6 não usa. Vazios = sem limite (uso normal).
+  cpus: ${APP_CPUS:-0}
+  cpuset: ${SYSTEM_CPUSET:-}
+  restart: unless-stopped
+
+services:
+  # Réplicas da task (o ECS roda de 2 a 10). APP_REPLICAS=6 docker compose up -d para o teste de carga.
+  app:
+    <<: *app
+    build: ./bid-service
+    deploy:
+      replicas: ${APP_REPLICAS:-2}
+
+  nginx:
+    image: nginx:1.29-alpine
+    cpuset: ${SYSTEM_CPUSET:-}
+    ulimits:
+      nofile: 65535
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/local/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    cpuset: ${SYSTEM_CPUSET:-}
+    # Igual ao ElastiCache: sem persistência em disco e sem eviction (estado de leilão não pode sumir por LRU).
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  postgres:
+    image: postgres:17-alpine
+    cpuset: ${SYSTEM_CPUSET:-}
+    environment:
+      POSTGRES_DB: auction
+      POSTGRES_USER: auction
+      POSTGRES_PASSWORD: auction
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auction -d auction"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    volumes:
+      - ./infra/local/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./infra/local/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+    ports:
+      - "3000:3000"
