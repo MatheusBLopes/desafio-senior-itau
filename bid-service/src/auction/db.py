@@ -16,7 +16,9 @@ _LOCK_ID = 727_001  # identificador arbitrário do advisory lock das migrations
 
 
 async def create_pool(dsn: str, size: int) -> asyncpg.Pool:
-    return await asyncpg.create_pool(dsn, min_size=1, max_size=size, command_timeout=10)
+    # timeout = conexão nova: um banco parado ou inalcançável não responde (sem RST), e o padrão de 60 s
+    # empataria com o idle timeout do ALB (504). Com 3 s, a requisição vira 503 rápido (medido na AWS).
+    return await asyncpg.create_pool(dsn, min_size=1, max_size=size, timeout=3, command_timeout=10)
 
 
 async def migrate(pool: asyncpg.Pool, directory: Path = MIGRATIONS) -> None:
