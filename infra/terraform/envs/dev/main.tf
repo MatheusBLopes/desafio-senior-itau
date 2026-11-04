@@ -41,6 +41,11 @@ module "rds" {
   multi_az          = var.db_multi_az
 }
 
+module "cognito" {
+  source = "../../modules/cognito"
+  name   = local.name
+}
+
 module "ecs" {
   source                    = "../../modules/ecs"
   name                      = local.name
@@ -53,6 +58,9 @@ module "ecs" {
   db_endpoint               = module.rds.endpoint
   db_password_parameter_arn = module.rds.password_parameter_arn
   redis_endpoint            = module.elasticache.primary_endpoint
+  cognito_user_pool_id      = module.cognito.user_pool_id
+  cognito_user_pool_arn     = module.cognito.user_pool_arn
+  cognito_client_id         = module.cognito.client_id
   min_tasks                 = var.min_tasks
   max_tasks                 = var.max_tasks
   on_demand_base            = var.on_demand_base

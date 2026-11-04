@@ -81,6 +81,12 @@ resource "aws_iam_role_policy" "task" {
         Effect   = "Allow"
         Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
         Resource = "*"
+      },
+      {
+        # Confirmar o cadastro na hora, sem e-mail. Só essa ação administrativa, só neste user pool.
+        Effect   = "Allow"
+        Action   = ["cognito-idp:AdminConfirmSignUp"]
+        Resource = var.cognito_user_pool_arn
       }
     ]
   })
@@ -96,6 +102,10 @@ locals {
     REDIS_TLS  = "true"
     AWS_REGION = data.aws_region.current.region
     JSON_LOGS  = "true"
+    # Autenticação: access token (JWT) do Cognito em Authorization: Bearer.
+    AUTH_MODE            = "cognito"
+    COGNITO_USER_POOL_ID = var.cognito_user_pool_id
+    COGNITO_CLIENT_ID    = var.cognito_client_id
     # Métricas de negócio (namespace Auction) via Embedded Metric Format: linhas JSON no stdout que o
     # CloudWatch Logs transforma em métricas, sem chamadas PutMetricData.
     CLOUDWATCH_EMF = "true"

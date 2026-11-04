@@ -89,6 +89,18 @@ variable "redis_endpoint" {
   type = string
 }
 
+variable "cognito_user_pool_id" {
+  type = string
+}
+
+variable "cognito_user_pool_arn" {
+  type = string
+}
+
+variable "cognito_client_id" {
+  type = string
+}
+
 variable "log_retention_days" {
   type    = number
   default = 7

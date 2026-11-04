@@ -26,3 +26,11 @@ output "ecs_service_name" {
 output "db_identifier" {
   value = module.rds.identifier
 }
+
+output "cognito_user_pool_id" {
+  value = module.cognito.user_pool_id
+}
+
+output "cognito_client_id" {
+  value = module.cognito.client_id
+}
