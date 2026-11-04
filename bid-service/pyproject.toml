@@ -1,0 +1,48 @@
+[project]
+name = "bid-service"
+version = "1.0.0"
+description = "Leilão de alta concorrência: motor de lances atômico no Valkey, write-behind para o Postgres e tempo real por WebSocket."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.118.0",
+    "uvicorn[standard]==0.37.0",
+    "redis[hiredis]==6.4.0",
+    "asyncpg==0.30.0",
+    "orjson==3.11.3",
+    "prometheus-client==0.23.1",
+]
+
+[project.optional-dependencies]
+# Traces na AWS: auto-instrumentação OpenTelemetry → sidecar ADOT → X-Ray (ver Dockerfile).
+otel = [
+    "opentelemetry-distro==0.58b0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.37.0",
+    "opentelemetry-instrumentation-fastapi==0.58b0",
+    "opentelemetry-instrumentation-redis==0.58b0",
+    "opentelemetry-instrumentation-asyncpg==0.58b0",
+    "opentelemetry-instrumentation-logging==0.58b0",
+    "opentelemetry-propagator-aws-xray==1.0.2",
+    "opentelemetry-sdk-extension-aws==2.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+    "pytest-asyncio==1.2.0",
+    "testcontainers[postgres]==4.13.1",
+    "httpx==0.28.1",
+    "websockets==15.0.1",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auction"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
