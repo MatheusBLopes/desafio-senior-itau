@@ -118,6 +118,7 @@ class BidStreamConsumer:
         self._task: asyncio.Task[None] | None = None
         self._next_sweep = 0.0
         self._dirty: set[uuid.UUID] = set()
+        self._retry: set[uuid.UUID] = set()  # leilões com lote lido e não gravado por ESTE consumer
         self._wake = asyncio.Event()
 
     def notify(self, auction_id: uuid.UUID) -> None:
@@ -154,8 +155,11 @@ class BidStreamConsumer:
                         if await self._drain(aid) >= self._s.consumer_batch_size:
                             self._dirty.add(aid)  # lote cheio: o stream ainda tem mais
                     except Exception as e:
-                        # O lote fica pendente e é reivindicado depois (claim_stale); os outros leilões seguem.
+                        # O lote fica pendente com este consumer, que tenta de novo na próxima volta (1 s),
+                        # sem esperar a reivindicação de 30 s; os outros leilões seguem.
                         failed = True
+                        self._retry.add(aid)
+                        self._dirty.add(aid)
                         log.warning("falha ao persistir o stream do leilão %s: %s", aid, e)
                 if sweep:
                     await self._maintenance(active)
@@ -186,16 +190,21 @@ class BidStreamConsumer:
         return ids
 
     async def _drain(self, auction_id: uuid.UUID) -> int:
+        """Lê e grava o próximo lote. Depois de uma falha, relê primeiro os pendentes deste consumer (ID "0")."""
         key = common.stream_key(auction_id)
+        position = "0" if auction_id in self._retry else ">"
         try:
-            reply = await self._redis.xreadgroup(self._s.consumer_group, self.consumer_name, {key: ">"},
+            reply = await self._redis.xreadgroup(self._s.consumer_group, self.consumer_name, {key: position},
                                                  count=self._s.consumer_batch_size)
         except ResponseError as e:
             if "NOGROUP" in str(e):
                 return 0  # stream sumiu (restart do Valkey); a reidratação recria o grupo
             raise
-        records = reply[0][1] if reply else []
+        records = [r for r in (reply[0][1] if reply else []) if r[1]]  # pendente já cortado pelo MAXLEN vem vazio
         if not records:
+            if position == "0":
+                self._retry.discard(auction_id)
+                self._dirty.add(auction_id)  # nada pendente: volta a ler os novos
             return 0
         await self._persist_and_ack(auction_id, key, records)
         return len(records)

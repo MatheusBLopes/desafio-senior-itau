@@ -18,6 +18,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import BlockingConnectionPool, Redis
 from redis.asyncio.connection import SSLConnection
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import OutOfMemoryError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from . import db
@@ -38,6 +39,8 @@ log = logging.getLogger(__name__)
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 MANAGEMENT_PATHS = {"/metrics", "/health"}
+# Nenhum corpo legítimo passa de algumas centenas de bytes; o limite barra requisições gigantes (memória).
+MAX_BODY_BYTES = 16 * 1024
 
 
 @dataclass
@@ -205,6 +208,15 @@ class PortSeparation:
             if scope["type"] == "websocket":
                 return await send({"type": "websocket.close", "code": 1008})
             return await json_response({"code": "NOT_FOUND", "message": "não encontrado"}, 404)(scope, receive, send)
+        if scope["type"] == "http" and scope["method"] in ("POST", "PUT", "PATCH"):
+            headers = dict(scope["headers"])
+            length = headers.get(b"content-length")
+            if length is None and b"chunked" in headers.get(b"transfer-encoding", b""):
+                return await json_response({"code": "LENGTH_REQUIRED", "message": "envie Content-Length"},
+                                           411)(scope, receive, send)
+            if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
+                return await json_response({"code": "PAYLOAD_TOO_LARGE", "message": "corpo grande demais"},
+                                           413)(scope, receive, send)
         log_context.set({})
         return await self.app(scope, receive, send)
 
@@ -276,6 +288,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def overloaded(_: Request, e: Exception) -> Response:
         # Pool do Valkey esgotado ou Valkey fora: 503 diz ao cliente (e ao ALB) que é temporário.
         log.warning("Valkey indisponível: %s", e)
+        return json_response({"code": "UNAVAILABLE", "message": "tente de novo em instantes"}, 503,
+                             {"Retry-After": "1"})
+
+    @app.exception_handler(OutOfMemoryError)
+    async def valkey_full(_: Request, e: OutOfMemoryError) -> Response:
+        # Valkey cheio com noeviction: o script é recusado no primeiro comando de escrita, antes de gravar
+        # qualquer coisa, então não há efeito parcial. Temporário para o cliente; o alarme de memória avisa.
+        log.error("Valkey sem memória (noeviction): %s", e)
+        return json_response({"code": "UNAVAILABLE", "message": "tente de novo em instantes"}, 503,
+                             {"Retry-After": "1"})
+
+    @app.exception_handler(asyncpg.PostgresError)
+    @app.exception_handler(asyncpg.InterfaceError)
+    @app.exception_handler(OSError)
+    @app.exception_handler(TimeoutError)
+    async def database_unavailable(_: Request, e: Exception) -> Response:
+        # Postgres fora, pool esgotado ou rede: só cadastro e leitura dependem dele; lances seguem pelo Valkey.
+        log.warning("Postgres indisponível: %r", e)
         return json_response({"code": "UNAVAILABLE", "message": "tente de novo em instantes"}, 503,
                              {"Retry-After": "1"})
 
@@ -384,9 +414,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/readyz")
     async def readyz(request: Request) -> Response:
-        """Health check do ALB: só recebe tráfego a task que alcança o Valkey e o Postgres."""
-        up = all(v == "UP" for v in (await readiness(container(request))).values())
-        return json_response({"status": "UP" if up else "DOWN"}, 200 if up else 503)
+        """Health check do ALB: só o Valkey, que é o caminho crítico do lance.
+
+        O Postgres fica de fora de propósito. Com ele aqui, uma queda do banco deixaria TODAS as tasks
+        "unhealthy" e o ECS as substituiria em loop, derrubando os lances, que continuam funcionando sem o
+        banco (write-behind: acumulam no stream). O estado do Postgres aparece em /health e nos alarmes.
+        """
+        c = container(request)
+        try:
+            await asyncio.wait_for(c.redis.ping(), 2)
+            return json_response({"status": "UP"})
+        except Exception:
+            return json_response({"status": "DOWN"}, 503)
 
     @app.get("/health")
     async def health(request: Request) -> Response:
