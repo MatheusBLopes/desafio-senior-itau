@@ -83,9 +83,9 @@ async def test_expired_wrong_issuer_wrong_client_and_id_token_are_refused(signer
     verifier, _ = verifier_for(signer)
     assert "expirado" in await rejected(verifier, signer.token(exp=int(time.time()) - 60))
     assert "inválido" in await rejected(verifier, signer.token(iss="https://evil.example.com/pool"))
-    assert "outro app client" in await rejected(verifier, signer.token(client_id="other-client"))
+    assert "inválido" in await rejected(verifier, signer.token(client_id="other-client"))
     assert "access token" in await rejected(verifier, signer.token(token_use="id"))
-    assert "formato" in await rejected(verifier, signer.token(username="ana:admin"))
+    assert "inválido" in await rejected(verifier, signer.token(username="ana:admin"))
     assert "inválido" in await rejected(verifier, signer.token(username=None))
 
 
@@ -117,6 +117,17 @@ async def test_tampered_payload_and_foreign_key_are_refused(signer):
     impostor = KeyPair(signer.kid)
     assert "inválido" in await rejected(verifier, impostor.token("ana"))
     assert "malformado" in await rejected(verifier, "isto-nao-e-um-jwt")
+
+
+async def test_cognito_unreachable_is_a_503_not_a_bad_token(signer):
+    class Down:
+        async def fetch(self) -> dict:
+            raise OSError("cognito fora do ar")
+
+    verifier = JwtVerifier(ISSUER, CLIENT_ID, Down())
+    with pytest.raises(ApiError) as e:
+        await verifier.user_of(signer.token("ana"))
+    assert e.value.status == 503
 
 
 async def test_key_rotation_refetches_the_jwks_but_unknown_kids_cannot_flood_it(signer):

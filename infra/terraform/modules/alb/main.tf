@@ -1,11 +1,11 @@
 # ALB: HTTP/REST e WebSocket nativos, custo fixo baixo (o API Gateway WebSocket cobra por
-# mensagem e por minuto de conexão). Sem sticky session: o cliente STOMP não usa SockJS.
+# mensagem e por minuto de conexão). Sem sticky session: o WebSocket é puro, sem SockJS.
 resource "aws_lb" "this" {
   name               = var.name
   load_balancer_type = "application"
   security_groups    = [var.security_group_id]
   subnets            = var.subnet_ids
-  idle_timeout       = 60 # heartbeat STOMP de 10 s mantém o WebSocket vivo
+  idle_timeout       = 60 # o ping de WebSocket da app (10 s) mantém a conexão viva
 }
 
 resource "aws_lb_target_group" "app" {

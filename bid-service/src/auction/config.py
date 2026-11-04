@@ -59,7 +59,8 @@ class Settings:
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
     # cognito (AWS): JWT do Amazon Cognito. header (local, carga): X-User-Id sem prova de identidade.
-    auth_mode: str = "header"
+    # Default seguro: sem configuração, exige Cognito (e não sobe sem o pool); o modo header é explícito.
+    auth_mode: str = "cognito"
     cognito_region: str = "us-east-1"
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
@@ -88,7 +89,7 @@ class Settings:
                 per_ip_enabled=_bool("PER_IP_RATE_LIMIT_ENABLED", True),
             ),
             json_logs=_bool("JSON_LOGS", False),
-            auth_mode=_env("AUTH_MODE", "header"),
+            auth_mode=_env("AUTH_MODE", "cognito"),
             cognito_region=_env("AWS_REGION", "us-east-1"),
             cognito_user_pool_id=_env("COGNITO_USER_POOL_ID", ""),
             cognito_client_id=_env("COGNITO_CLIENT_ID", ""),

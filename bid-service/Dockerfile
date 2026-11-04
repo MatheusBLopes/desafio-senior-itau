@@ -17,11 +17,12 @@ ARG PY_PLATFORM=x86_64-manylinux_2_28
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 COPY pyproject.toml uv.lock ./
-# Dependências antes do código: a camada só é refeita quando o uv.lock muda.
-RUN uv export --frozen --no-dev --extra otel --no-hashes --no-emit-project -o /tmp/requirements.txt \
+# Dependências antes do código: a camada só é refeita quando o uv.lock muda. Cada wheel baixado é conferido
+# contra o hash gravado no uv.lock (--require-hashes): um pacote adulterado no caminho não entra na imagem.
+RUN uv export --frozen --no-dev --extra otel --no-emit-project -o /tmp/requirements.txt \
  && uv venv /app/.venv --python /usr/local/bin/python3.13 \
  && uv pip install --python /app/.venv/bin/python --python-platform "$PY_PLATFORM" --only-binary :all: \
-      -r /tmp/requirements.txt
+      --require-hashes -r /tmp/requirements.txt
 COPY src src
 RUN uv pip install --python /app/.venv/bin/python --python-platform "$PY_PLATFORM" --no-deps .
 

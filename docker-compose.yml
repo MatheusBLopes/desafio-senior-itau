@@ -9,6 +9,8 @@ x-app: &app
     DB_PASSWORD: auction
     REDIS_HOST: valkey
     JSON_LOGS: "true"
+    # Sem Cognito localmente: o usuário vem do X-User-Id. Na AWS, AUTH_MODE=cognito (Terraform).
+    AUTH_MODE: header
     AUCTION_RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
     # O k6 roda de uma máquina só (um IP): desligar para o teste de carga.
     PER_IP_RATE_LIMIT_ENABLED: ${PER_IP_RATE_LIMIT_ENABLED:-true}

@@ -89,6 +89,7 @@ class JwtVerifier:
         self._clock = clock
         self._keys: dict[str, Any] = {}
         self._last_refresh = float("-inf")
+        self._fetch_failed = False
         self._refresh_lock = asyncio.Lock()
         self._verified: OrderedDict[str, tuple[str, float]] = OrderedDict()
 
@@ -121,13 +122,13 @@ class JwtVerifier:
         except jwt.ExpiredSignatureError:
             raise unauthorized("token expirado") from None
         except jwt.PyJWTError as e:
-            raise unauthorized(f"token inválido: {e}") from None
+            log.info("token recusado: %s", e)  # o detalhe fica no log; o cliente recebe uma mensagem genérica
+            raise unauthorized("token inválido") from None
         if claims["token_use"] != "access":
             raise unauthorized("use o access token, não o id token")
-        if claims["client_id"] != self._client_id:
-            raise unauthorized("token de outro app client")
-        if not USER_ID.match(str(claims["username"])):
-            raise unauthorized("usuário do token fora do formato aceito")
+        if claims["client_id"] != self._client_id or not USER_ID.match(str(claims["username"])):
+            log.info("token recusado: client_id ou username inesperado")
+            raise unauthorized("token inválido")
         return claims
 
     async def _key(self, kid: str | None) -> Any:
@@ -137,7 +138,10 @@ class JwtVerifier:
             await self._refresh()
         key = self._keys.get(kid)
         if key is None:
-            raise unauthorized("chave de assinatura desconhecida")
+            if not self._keys and self._fetch_failed:
+                # Sem nenhuma chave porque o Cognito não respondeu: o problema é nosso, não do token.
+                raise ApiError(503, "UNAVAILABLE", "não foi possível validar o token agora")
+            raise unauthorized("token inválido")
         return key
 
     async def _refresh(self) -> None:
@@ -149,7 +153,10 @@ class JwtVerifier:
                 jwks = await self._jwks.fetch()
             except Exception as e:
                 log.warning("falha ao buscar o JWKS do Cognito: %s", e)
+                self._fetch_failed = True
+                self._last_refresh = float("-inf")  # tenta de novo na próxima requisição
                 return
+            self._fetch_failed = False
             self._keys = {k["kid"]: RSAAlgorithm.from_jwk(k) for k in jwks.get("keys", [])
                           if k.get("kty") == "RSA" and k.get("kid")}
 

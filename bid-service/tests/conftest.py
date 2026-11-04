@@ -62,6 +62,7 @@ async def server(containers) -> AsyncIterator[Server]:
         consumer_claim_min_idle_ms=2000,
         consumer_maintenance_interval_s=1,
         rate_limit=RateLimitConfig(enabled=False, per_ip_enabled=False),
+        auth_mode="header",
         # O teste de concorrência chama o serviço direto, sem o LoadShedder na frente: mais de 10 mil
         # corrotinas disputam o pool de 64 conexões. Ele mede correção, não capacidade.
         redis_pool_timeout_s=30,
