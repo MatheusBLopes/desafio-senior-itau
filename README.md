@@ -2,11 +2,13 @@
 
 Solução para o desafio técnico de Engenharia de Software: um motor de lances que aguenta centenas de milhares de usuários nos últimos segundos de um leilão, com ordem determinística, sem lances inválidos ou duplicados e com atualização em tempo real.
 
-**Stack:** Python 3.13 · FastAPI + uvicorn (asyncio, uvloop) · redis-py · asyncpg · Valkey 8 (Lua, Streams, Pub/Sub) · PostgreSQL 17 · WebSocket · Terraform (AWS: ECS Fargate Graviton, ALB, ElastiCache, RDS) · k6 · pytest + Testcontainers
+**Stack:** Python 3.13 · FastAPI + uvicorn (asyncio, uvloop) · redis-py · asyncpg · Valkey 8 (Lua, Streams, Pub/Sub) · PostgreSQL 17 · WebSocket · Amazon Cognito (JWT) · Terraform (AWS: ECS Fargate Graviton, ALB, ElastiCache, RDS) · k6 · pytest + Testcontainers
 
 | Documento | Conteúdo |
 |---|---|
-| [`docs/decisoes-tecnicas.md`](docs/decisoes-tecnicas.md) | 13 ADRs curtos com o porquê de cada escolha |
+| [`docs/decisoes-tecnicas.md`](docs/decisoes-tecnicas.md) | 14 ADRs curtos com o porquê de cada escolha |
+| [`docs/analise-de-falhas.md`](docs/analise-de-falhas.md) | O que acontece quando cada ponto do fluxo falha, com evidência (teste, falha provocada local ou na AWS) e correção |
+| [`docs/analise-de-seguranca.md`](docs/analise-de-seguranca.md) | Vulnerabilidades encontradas, o que foi corrigido e o que falta, por severidade |
 | [`docs/finops.md`](docs/finops.md) | Custo da arquitetura, alternativas descartadas e custo do pico |
 | [`docs/arquitetura-aws.png`](docs/arquitetura-aws.png) | Desenho da arquitetura AWS (fonte editável em `.svg`) |
 | [`load-test/results/`](load-test/results/README.md) | Capacidade medida por task, linearidade e comportamento sob sobrecarga |
@@ -61,8 +63,8 @@ Transcrição do enunciado recebido.
 ### Fluxo de um lance
 
 ```
-cliente ── POST /auctions/{id}/bids (X-User-Id, Idempotency-Key) ──► task
-  task: load shedding → rate limit (IP, usuário) → pré-filtro (cache local) → EVALSHA place_bid.lua
+cliente ── POST /auctions/{id}/bids (Authorization: Bearer <JWT>, Idempotency-Key) ──► task
+  task: load shedding → JWT (validado na task) → rate limit (IP, usuário) → pré-filtro (cache local) → EVALSHA place_bid.lua
   Valkey, atômico: idempotência → prazo → valor → INCR seq → XADD stream → PUBLISH evento
   ◄── 201 {seq, preço, próximo mínimo, endsAt}
 
@@ -151,9 +153,22 @@ Pausado, o custo cai para **~US$ 1,1/dia**: o ALB e seus IPv4 e o nó do ElastiC
 |---|---|---|
 | `POST` | `/auctions` | Cria um leilão. Corpo: `title`, `startingPrice`, `minIncrement`, `durationSeconds`, `antiSnipingWindowSeconds` (padrão 10), `antiSnipingExtendSeconds` (padrão 10) |
 | `GET` | `/auctions/{id}` | Estado vivo: preço, líder, `seq`, próximo mínimo, `endsAt`, `serverTime`, vencedor |
-| `POST` | `/auctions/{id}/bids` | Lance. Headers obrigatórios: `X-User-Id` (`[A-Za-z0-9_-]{1,64}`), `Idempotency-Key`. Corpo: `{"amount": 150.00}` |
+| `POST` | `/auth/signup` | Cria o usuário no Cognito, já confirmado (sem e-mail). Corpo: `{"username": "[A-Za-z0-9_-]{3,64}", "password": "..."}` |
+| `POST` | `/auth/login` | Devolve `{"accessToken", "tokenType": "Bearer", "expiresIn": 3600}` |
+| `POST` | `/auctions/{id}/bids` | Lance. Headers obrigatórios: `Authorization: Bearer <access token>` (local: `X-User-Id`) e `Idempotency-Key`. Corpo: `{"amount": 150.00}` |
 | `GET` | `/auctions/{id}/bids?afterSeq=N&limit=100` | Lances aceitos com seq > N, em ordem (Postgres + stream) |
 | WS | `/ws/auctions/{id}` | JSON: `AUCTION_SNAPSHOT` (também logo ao conectar), `AUCTION_EXTENDED` e `AUCTION_CLOSED`, todos com `seq`. Só leitura: mensagem do cliente fecha a conexão (1008); caminho que não é um UUID recebe 403 no handshake |
+
+
+**Autenticação.** Na AWS (`AUTH_MODE=cognito`), o usuário do lance é o `username` do access token do Amazon Cognito, validado na própria task (RS256, chaves do JWKS em cache, `iss`, `client_id`, `token_use` e `exp`): o Cognito fica fora do caminho do lance. Criar leilão e dar lance exigem token; leitura e WebSocket são públicos. Localmente não há Cognito, então o Compose usa `AUTH_MODE=header` (usuário no `X-User-Id`, sem prova de identidade); sem configuração, a aplicação exige Cognito (fail-closed). Detalhes no ADR-14.
+
+```bash
+curl -X POST $ALB/auth/signup -H 'Content-Type: application/json' -d '{"username":"ana","password":"senha-forte-1"}'
+TOKEN=$(curl -s -X POST $ALB/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"ana","password":"senha-forte-1"}' | jq -r .accessToken)
+curl -X POST $ALB/auctions/$ID/bids -H "Authorization: Bearer $TOKEN" -H 'Idempotency-Key: 7f1c...' \
+  -H 'Content-Type: application/json' -d '{"amount": 100.00}'
+```
 
 **Respostas do lance:**
 
@@ -166,6 +181,8 @@ Pausado, o custo cai para **~US$ 1,1/dia**: o ALB e seus IPv4 e o nó do ElastiC
 | `429` | Rate limit (por usuário ou por IP) |
 | `503` | Task acima da capacidade (`OVERLOADED`) ou Valkey indisponível (`UNAVAILABLE`), com `Retry-After: 1` |
 | `400` | Validação |
+| `401` | Sem token, token inválido, expirado ou de outro app client |
+| `413` / `411` | Corpo acima de 16 KiB / chunked sem `Content-Length` |
 | `404` | Leilão inexistente |
 
 Valores monetários entram como número ou string (`150.00` ou `"150.00"`) e saem sempre como string com 2 casas, nunca como float. O replay de uma rejeição devolve o mesmo status da resposta original, com `Idempotent-Replayed: true`. Isso refina o plano original, que previa `200` para todo replay, e segue o padrão de APIs de pagamento.
@@ -189,7 +206,7 @@ npx wscat -c ws://localhost:8080/ws/auctions/$ID
 
 ## 6. Testes e resultados
 
-### Automatizados (`uv run pytest`: 34 testes, Valkey e Postgres reais)
+### Automatizados (`uv run pytest`: 47 testes, Valkey e Postgres reais)
 
 A sessão de testes sobe Valkey e Postgres em containers e a aplicação inteira num servidor uvicorn em portas aleatórias, no mesmo event loop dos testes.
 
@@ -199,6 +216,8 @@ A sessão de testes sobe Valkey e Postgres em containers e a aplicação inteira
 | `test_concurrency.py` (1) | **500 usuários × 20 lances simultâneos (10 mil) + ~1.000 retries concorrentes** em corrotinas: seqs únicos e contíguos; cada lance aceito ≥ anterior + incremento; nenhuma key aceita duas vezes; vencedor correto; Postgres converge com zero violações |
 | `test_api.py` (8) | Contrato HTTP (201/200/409/422/400/404, valor como número ou string); métricas e health detalhado só na porta interna, `/readyz` e `/livez` na pública; encerramento com vencedor persistido; `afterSeq` com o consumer parado (lê do stream) e depois do banco; **`afterSeq` com lotes gravados fora de ordem** (não pula seqs); **`FLUSHALL` no Valkey** e reidratação (seq continua em 4 e o preço não volta); WebSocket recebe snapshot e encerramento; **cliente WS que tenta publicar é desconectado e um caminho fora de um leilão é recusado** |
 | `test_failure_modes.py` (6) | Lance aceito que colide no Postgres vai para `bid_conflicts` com métrica; Valkey atrás do banco (failover) alcança o banco em vez de reusar seqs; entrada órfã no ZSET de encerramento e membro inválido no SET de streams não travam os outros leilões; **Valkey que perdeu o cache de scripts (`NOSCRIPT`)** continua aceitando lances; **consumer persiste pelo aviso do Pub/Sub em < 1 s e, se o aviso se perder, na varredura** |
+| `test_auth.py` (9) | JWT: token válido e cache; expirado, outro emissor, outro app client, id token no lugar do access token, usuário inválido; `alg=none` e confusão HS256 com a chave pública; payload adulterado e chave de outro emissor; rotação de chave sem inundar o JWKS; Cognito fora = 503. API: cadastro, login, lance com token (o `X-User-Id` é ignorado), 401 sem token antes de validar o corpo |
+| `test_degradation.py` (4) | Postgres fora: task continua pronta, lances aceitos, leitura 503; Valkey sem memória: 503 sem escrita parcial; corpo grande 413 e chunked 411; o consumer regrava o próprio lote que falhou sem esperar a reivindicação |
 | `test_load_shedding.py` (2) | Acima do limite de requisições em andamento, `503` com `Retry-After`, sem bloquear as probes; Valkey indisponível vira `503`, não `500` |
 | `test_event_dispatch.py` (1) | Eventos do Pub/Sub são aplicados na ordem de publicação (reidratação seguida de lance) |
 | `test_ip_rate_limiter.py` (3) | Unitário: limite por IP independe do `X-User-Id`; reposição; buckets ociosos são descartados; o IP do cliente só é lido do `X-Forwarded-For` quando a conexão vem de um proxy privado |
@@ -317,7 +336,7 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 | Item | Custo aproximado | Para quê |
 |---|---|---|
 | CloudFront + AWS WAF | WAF ~US$ 5/mês + US$ 1/regra + US$ 0,60/milhão de requests | Rate limit por IP, Bot Control e Shield Standard incluso. Shield Advanced custa US$ 3 mil/mês e só se justifica com histórico de DDoS |
-| Cognito/JWT | Grátis até 10 mil MAU (depois ~US$ 0,0055/MAU) | Substitui o `X-User-Id` do MVP |
+| TLS no ALB (ACM) ou CloudFront | Certificado ACM grátis; CloudFront por GB | Senhas e tokens hoje trafegam em HTTP: ver `docs/analise-de-seguranca.md` (A1) |
 | NAT ou VPC endpoints + tasks em subnets privadas | Ver FinOps | Exigência típica de ambiente regulado |
 
 ### Evolução

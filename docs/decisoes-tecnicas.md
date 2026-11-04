@@ -160,3 +160,21 @@ Medidos, com SLO atendido: **~1.000 lances/s numa task de 0,5 vCPU e ~2.100 numa
 **Dois achados do método:**
 - O healthcheck do Compose com `python -c` custava ~190 ms de CPU por execução dentro do cgroup da task e, com 0,5 vCPU, travava o processo a cada check (p99 de 64 ms a só 400 lances/s). Trocado por `bash /dev/tcp`; o p99 caiu para 1 ms. No Fargate não há check dentro do container: o ALB checa `/readyz` pela rede.
 - O consumer do write-behind varria um stream por leilão aberto a cada 20 ms, mesmo sem lances, um custo que cresce com leilões × tasks. Agora ele lê só os streams que o Pub/Sub avisou que receberam eventos, mais uma varredura de segurança a cada 5 s para avisos perdidos (o Pub/Sub é at-most-once). Testado nos dois caminhos.
+
+## ADR-14 — Autenticação com JWT do Cognito, validado na task
+
+**Contexto.** O usuário do lance vinha do header `X-User-Id`, declarado pelo cliente: qualquer um dava lances em nome de outro. O pedido era autenticação básica, simples, sem confirmação de e-mail nem outros serviços (Lambda, SES, SMS).
+
+**Decisão.**
+- **Amazon Cognito (tier Lite, grátis até 10 mil usuários ativos/mês)** emite os tokens; a aplicação não guarda senhas.
+- **Cadastro pela API, confirmado na hora:** `POST /auth/signup` chama `SignUp` e logo `AdminConfirmSignUp`, a única ação administrativa que a role da task pode executar, e só neste pool. Sem e-mail e sem Lambda de pré-cadastro.
+- **Login pela API:** `POST /auth/login` (`USER_PASSWORD_AUTH`) devolve o access token (1 h). O cliente também pode falar direto com o Cognito; a API só simplifica.
+- **Validação local, sem chamar o Cognito a cada lance:** assinatura RS256 com as chaves públicas do pool (JWKS em cache, rebuscado em rotação no máximo a cada 30 s), `iss`, `client_id`, `token_use=access` e `exp`. Tokens já validados ficam em cache até o `exp` (LRU de 10 mil), porque um usuário manda muitos lances com o mesmo token.
+- **O usuário é o `username` do token**, com o mesmo formato de antes (sem `:`), então chaves de idempotência e rate limit continuam iguais.
+- **Fail-closed:** o modo padrão é `cognito`; o modo `header` existe só para desenvolvimento local e testes de carga, e precisa ser ligado explicitamente.
+
+**Consequências.**
+- O Cognito fica fora do caminho crítico: se ele cair, quem já tem token continua dando lances; só cadastro e login param (503).
+- Um token roubado ou de conta bloqueada vale até expirar (até 1 h); ver `analise-de-seguranca.md` (A11).
+- Sem verificação de e-mail, o cadastro é aberto a contas em massa; a defesa é WAF e CAPTCHA (A2).
+- Sem TLS no ALB, senhas e tokens trafegam em claro: TLS é o primeiro item antes de uso real (A1).
