@@ -86,6 +86,8 @@ Custo estimado: **~US$ 128/mês, ou ~US$ 0,18/h** para subir só na demo (seçã
 
 ## 4. Como rodar
 
+Os comandos abaixo também estão no `Makefile`: `make help` lista todos (`make up`, `make test`, `make logs`, `make down`…).
+
 ### Local (Docker Compose)
 
 Pré-requisitos: Docker com Compose. Para os testes, [uv](https://docs.astral.sh/uv/) (instala o Python 3.13 sozinho).
