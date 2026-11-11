@@ -2,16 +2,7 @@
 
 Solução para o desafio técnico de Engenharia de Software: um motor de lances que aguenta centenas de milhares de usuários nos últimos segundos de um leilão, com ordem determinística, sem lances inválidos ou duplicados e com atualização em tempo real.
 
-**Stack:** Python 3.13 · FastAPI + uvicorn (asyncio, uvloop) · redis-py · asyncpg · Valkey 8 (Lua, Streams, Pub/Sub) · PostgreSQL 17 · WebSocket · Amazon Cognito (JWT) · Terraform (AWS: ECS Fargate Graviton, ALB, ElastiCache, RDS) · k6 · pytest + Testcontainers
-
-| Documento | Conteúdo |
-|---|---|
-| [`docs/decisoes-tecnicas.md`](docs/decisoes-tecnicas.md) | 14 ADRs curtos com o porquê de cada escolha |
-| [`docs/analise-de-falhas.md`](docs/analise-de-falhas.md) | O que acontece quando cada ponto do fluxo falha, com evidência (teste, falha provocada local ou na AWS) e correção |
-| [`docs/analise-de-seguranca.md`](docs/analise-de-seguranca.md) | Vulnerabilidades encontradas, o que foi corrigido e o que falta, por severidade |
-| [`docs/finops.md`](docs/finops.md) | Custo da arquitetura, alternativas descartadas e custo do pico |
-| [`docs/arquitetura-aws.png`](docs/arquitetura-aws.png) | Desenho da arquitetura AWS (fonte editável em `.svg`) |
-| [`load-test/results/`](load-test/results/README.md) | Capacidade medida por task, linearidade e comportamento sob sobrecarga |
+**Stack:** Python 3.13 · FastAPI + uvicorn (asyncio, uvloop) · redis-py · asyncpg · Valkey 8 (Lua, Streams, Pub/Sub) · PostgreSQL 17 · WebSocket · Amazon Cognito (JWT) · Terraform (AWS: ECS Fargate Graviton, ALB, ElastiCache, RDS) · pytest + Testcontainers
 
 ---
 
@@ -44,10 +35,10 @@ Transcrição do enunciado recebido.
 
 | Requisito | Como é garantido | Onde |
 |---|---|---|
-| **Ordem determinística** | `HINCRBY seq` dentro do script: cada lance aceito recebe um número único e contíguo (1, 2, 3...). "Ordem de chegada" = ordem de serialização no Valkey (ver ADR-02). | `place_bid.lua` |
+| **Ordem determinística** | `HINCRBY seq` dentro do script: cada lance aceito recebe um número único e contíguo (1, 2, 3...). "Ordem de chegada" = ordem de serialização no Valkey. | `place_bid.lua` |
 | **Relógio confiável** | Prazo e anti-sniping usam só o `TIME` do Valkey, nunca o relógio do cliente ou da task. | `place_bid.lua`, `RedisClock` (`storage/valkey.py`) |
 | **Sem lance inválido** | Na mesma execução atômica: leilão `OPEN`, dentro do prazo, valor ≥ preço inicial (1º lance) ou ≥ preço atual + incremento. No empate, vence quem chegou primeiro. | `place_bid.lua` |
-| **Sem duplicado** | `Idempotency-Key` obrigatório, memorizado por (leilão, usuário, key) com o resultado original, inclusive rejeições. Mesma key com outro valor: `422` (exceto se o original foi rejeitado no pré-filtro por já estar superado, ver ADR-03). A key de um lance aceito vive até o fim do leilão + 24 h. No Postgres, `PK (auction_id, seq)` e `UNIQUE (auction_id, user_id, idempotency_key)`; uma reentrega é ignorada e uma colisão real vai para `bid_conflicts`, com alarme. | `place_bid.lua`, `BidPersister` (`persistence/persister.py`), `storage/migrations/V1`/`V2__*.sql` |
+| **Sem duplicado** | `Idempotency-Key` obrigatório, memorizado por (leilão, usuário, key) com o resultado original, inclusive rejeições. Mesma key com outro valor: `422` (exceto se o original foi rejeitado no pré-filtro por já estar superado). A key de um lance aceito vive até o fim do leilão + 24 h. No Postgres, `PK (auction_id, seq)` e `UNIQUE (auction_id, user_id, idempotency_key)`; uma reentrega é ignorada e uma colisão real vai para `bid_conflicts`, com alarme. | `place_bid.lua`, `BidPersister` (`persistence/persister.py`), `storage/migrations/V1`/`V2__*.sql` |
 | **Tempo real** | O Lua publica no Pub/Sub; cada task envia snapshots por WebSocket aos seus clientes, consolidados a cada 150 ms (conflation). Prorrogação e encerramento saem na hora. | `realtime/` (`listener.py`, `broadcaster.py`) |
 | **Alta concorrência** | O caminho do lance é 1 script Lua no Valkey (mais o rate limit); o Postgres fica fora dele (write-behind via Redis Streams). Um pré-filtro na task resolve 97% dos lances (os já superados) sem chamar o Lua. Acima da capacidade, a task devolve o excesso como 503 em vez de enfileirar (load shedding). | `bidding/service.py`, `persistence/stream_consumer.py`, `LoadShedder` (`api/middleware.py`) |
 
@@ -56,8 +47,8 @@ Transcrição do enunciado recebido.
 - **Reidratação:** se o Valkey perder tudo, o estado é reconstruído do Postgres e o `seq` continua sem colidir.
 - **Encerramento idempotente:** com várias tasks, ninguém encerra duas vezes.
 - **Rate limit por usuário e por IP:** token bucket por usuário no Valkey (vale entre todas as tasks) e por IP de origem na memória de cada task, porque o `X-User-Id` é declarado pelo cliente e trocá-lo a cada request contornaria o primeiro. A defesa definitiva é autenticação + WAF (seção 9).
-- **Degradação controlada:** com o dobro da carga, a task atende o que consegue e devolve o resto como `503` com `Retry-After`, sem erro e sem colapso (ADR-12).
-- **Capacidade medida com método** (CPU isolada do gerador de carga, task do tamanho do Fargate, SLO) e o Terraform dimensionado por esse número (ADR-13).
+- **Degradação controlada:** com o dobro da carga, a task atende o que consegue e devolve o resto como `503` com `Retry-After`, sem erro e sem colapso.
+- **Capacidade medida com método** (CPU isolada do gerador de carga, task do tamanho do Fargate, SLO) e o Terraform dimensionado por esse número.
 - **Observabilidade completa e FinOps.**
 
 ### Fluxo de um lance
@@ -74,7 +65,7 @@ assíncrono: Pub/Sub → todas as tasks → snapshot WebSocket a cada 150 ms →
 
 ## 3. Arquitetura AWS
 
-![Arquitetura AWS](docs/arquitetura-aws.png)
+![Arquitetura AWS](arquitetura-aws.png)
 
 O Terraform (`infra/terraform`) provisiona a arquitetura básica:
 
@@ -91,7 +82,7 @@ O Terraform (`infra/terraform`) provisiona a arquitetura básica:
 | Custo | Budget + tags padrão |
 | State | S3 com lock nativo |
 
-Custo estimado: **~US$ 128/mês, ou ~US$ 0,18/h** para subir só na demo (ver [`docs/finops.md`](docs/finops.md)).
+Custo estimado: **~US$ 128/mês, ou ~US$ 0,18/h** para subir só na demo (seção 8).
 
 ## 4. Como rodar
 
@@ -101,8 +92,10 @@ Pré-requisitos: Docker com Compose. Para os testes, [uv](https://docs.astral.sh
 
 ```bash
 docker compose up -d --build        # 2 réplicas + nginx (papel do ALB) + Valkey + Postgres
-./scripts/smoke-test.sh             # 14 verificações ponta a ponta contra http://localhost:8080
+curl localhost:8080/readyz          # {"status":"UP"}
 ```
+
+A API fica em <http://localhost:8080>; os exemplos de uso estão na seção 5.
 
 - **Mais réplicas:** `APP_REPLICAS=4 docker compose up -d` (o nginx resolve as réplicas no startup: `docker compose restart nginx`).
 - **Observabilidade local:** `docker compose --profile observability up -d` sobe também Prometheus (<http://localhost:9090>), que descobre as réplicas pelo DNS do Docker, e Grafana (<http://localhost:3000>), com o datasource já configurado.
@@ -115,7 +108,7 @@ cd bid-service && uv run pytest
 
 ### AWS
 
-Implantado em 2026-11-03 numa conta pessoal e deixado **pausado** (ver abaixo). Pré-requisitos: AWS CLI com credenciais, Terraform ≥ 1.10 e Docker. O build ARM64 não precisa de buildx nem QEMU (ver `bid-service/Dockerfile`).
+Implantado e validado em 2026-11-03 numa conta pessoal; o ambiente foi removido depois, para não gerar custo. Para recriar, os pré-requisitos são AWS CLI com credenciais, Terraform ≥ 1.10 e Docker. O build ARM64 não precisa de buildx nem QEMU (ver `bid-service/Dockerfile`).
 
 ```bash
 # 1. Bucket do state (uma vez)
@@ -134,20 +127,13 @@ terraform apply -target=module.ecr
 
 # 4. Restante da infra (~15-20 min: RDS e ElastiCache são os lentos)
 terraform apply                                # usa a image_tag do tfvars
-../../../../scripts/smoke-test.sh "$(terraform output -raw alb_url)"
-uv run --project ../../../../bid-service python ../../../../scripts/ws-check.py "$(terraform output -raw alb_url)"
+curl "$(terraform output -raw alb_url)/readyz"  # {"status":"UP"}
+
+# Para remover tudo depois (o ECR vai junto, com force_delete)
+terraform destroy
 ```
 
-**Pausar e retomar** (para não pagar o ambiente parado entre testes):
-
-```bash
-./scripts/aws-pause.sh    # auto scaling travado em 0, tasks em 0, RDS parado
-./scripts/aws-resume.sh   # RDS de volta, 2 tasks, auto scaling 2..10 e smoke test (~5-10 min)
-```
-
-Pausado, o custo cai para **~US$ 1,1/dia**: o ALB e seus IPv4 e o nó do ElastiCache não têm pausa na AWS, e o disco do RDS continua cobrado. O RDS parado volta sozinho depois de 7 dias (regra da AWS). Custo zero só com `terraform destroy` (o ECR vai junto, com `force_delete`).
-
-**Testar no Bruno:** abra a pasta `bruno/` no [Bruno](https://www.usebruno.com/) (*Open Collection*) e escolha o ambiente `aws`. A collection percorre o sistema inteiro: saúde, cadastro e login no Cognito, criação do leilão, a disputa com as regras (idempotência, empate, incremento, token ausente ou adulterado), o WebSocket com os eventos ao vivo e o encerramento com o vencedor. Cada requisição tem testes e uma explicação na aba *Docs*. *Run* na collection leva ~70 s, porque espera o leilão de 60 s acabar. O WebSocket é interativo: conecte-o depois de criar o leilão e rode os lances com ele aberto.
+**Testar no Bruno:** abra a pasta `collection/` no [Bruno](https://www.usebruno.com/) (*Open Collection*) e escolha o ambiente `aws`. A collection percorre o sistema inteiro: saúde, cadastro e login no Cognito, criação do leilão, a disputa com as regras (idempotência, empate, incremento, token ausente ou adulterado), o WebSocket com os eventos ao vivo e o encerramento com o vencedor. Cada requisição tem testes e uma explicação na aba *Docs*. *Run* na collection leva ~70 s, porque espera o leilão de 60 s acabar. O WebSocket é interativo: conecte-o depois de criar o leilão e rode os lances com ele aberto.
 
 ## 5. API
 
@@ -162,7 +148,7 @@ Pausado, o custo cai para **~US$ 1,1/dia**: o ALB e seus IPv4 e o nó do ElastiC
 | WS | `/ws/auctions/{id}` | JSON: `AUCTION_SNAPSHOT` (também logo ao conectar), `AUCTION_EXTENDED` e `AUCTION_CLOSED`, todos com `seq`. Só leitura: mensagem do cliente fecha a conexão (1008); caminho que não é um UUID recebe 403 no handshake |
 
 
-**Autenticação.** Na AWS (`AUTH_MODE=cognito`), o usuário do lance é o `username` do access token do Amazon Cognito, validado na própria task (RS256, chaves do JWKS em cache, `iss`, `client_id`, `token_use` e `exp`): o Cognito fica fora do caminho do lance. Criar leilão e dar lance exigem token; leitura e WebSocket são públicos. Localmente não há Cognito, então o Compose usa `AUTH_MODE=header` (usuário no `X-User-Id`, sem prova de identidade); sem configuração, a aplicação exige Cognito (fail-closed). Detalhes no ADR-14.
+**Autenticação.** Na AWS (`AUTH_MODE=cognito`), o usuário do lance é o `username` do access token do Amazon Cognito, validado na própria task (RS256, chaves do JWKS em cache, `iss`, `client_id`, `token_use` e `exp`): o Cognito fica fora do caminho do lance. Criar leilão e dar lance exigem token; leitura e WebSocket são públicos. Localmente não há Cognito, então o Compose usa `AUTH_MODE=header` (usuário no `X-User-Id`, sem prova de identidade); sem configuração, a aplicação exige Cognito (fail-closed).
 
 ```bash
 curl -X POST $ALB/auth/signup -H 'Content-Type: application/json' -d '{"username":"ana","password":"senha-forte-1"}'
@@ -187,7 +173,7 @@ curl -X POST $ALB/auctions/$ID/bids -H "Authorization: Bearer $TOKEN" -H 'Idempo
 | `413` / `411` | Corpo acima de 16 KiB / chunked sem `Content-Length` |
 | `404` | Leilão inexistente |
 
-Valores monetários entram como número ou string (`150.00` ou `"150.00"`) e saem sempre como string com 2 casas, nunca como float. O replay de uma rejeição devolve o mesmo status da resposta original, com `Idempotent-Replayed: true`. Isso refina o plano original, que previa `200` para todo replay, e segue o padrão de APIs de pagamento.
+Valores monetários entram como número ou string (`150.00` ou `"150.00"`) e saem sempre como string com 2 casas, nunca como float. O replay de uma rejeição devolve o mesmo status da resposta original, com `Idempotent-Replayed: true`, como nas APIs de pagamento.
 
 **Exemplos:**
 
@@ -229,14 +215,7 @@ Correções críticas foram validadas por mutação: com o bug reintroduzido no 
 
 ### Capacidade (k6, local, com método)
 
-```bash
-# Capacidade de uma task do tamanho do Fargate (1 vCPU), subindo a taxa:
-APP_CPUS=1 ./load-test/capacity.sh 1 1600 2000 2400
-# Linearidade: N réplicas a ~80% da capacidade de cada uma
-APP_CPUS=0.5 ./load-test/capacity.sh 6 4800
-```
-
-O script isola a CPU: o sistema fica nos núcleos físicos 0–3 e o k6 nos 4–5. Assim o gerador de carga não rouba CPU do sistema medido. Cada réplica é limitada ao tamanho da task (`APP_CPUS`). Para cada taxa há 5 s de aquecimento, descartados, e 30 s medidos. O SLO é p99 < 50 ms, zero erros e zero descartes. Os usuários cobrem o mínimo conhecido (+0 a 2 incrementos) e 5% reenviam a mesma key. Tabelas completas em [`load-test/results/`](load-test/results/README.md).
+A medição isolou a CPU: o sistema ficou nos núcleos físicos 0–3 e o k6 nos 4–5. Assim o gerador de carga não roubou CPU do sistema medido. Cada réplica foi limitada ao tamanho da task do Fargate (`APP_CPUS` no Compose). Para cada taxa houve 5 s de aquecimento, descartados, e 30 s medidos. O SLO é p99 < 50 ms, zero erros e zero descartes. Os usuários cobrem o mínimo conhecido (+0 a 2 incrementos) e 5% reenviam a mesma key.
 
 | Medição | Resultado |
 |---|---|
@@ -248,7 +227,7 @@ O script isola a CPU: o sistema fica nos núcleos físicos 0–3 e o k6 nos 4–
 | CPU por lance | ~0,35 ms |
 | Motor isolado (`valkey-benchmark` no `place_bid.lua`) | ~49,5 mil execuções/s numa thread, p50 de 1,9 ms: o teto de **um** leilão |
 
-- **Dimensionamento:** 10 mil lances/s ÷ (2.100 × 70% de alvo) ≈ **7 tasks de 1 vCPU**, dentro do máximo de 10. Por isso a task é de 1 vCPU / 2 GB e a escala por requisições usa 90 mil req/min por task (ADR-13).
+- **Dimensionamento:** 10 mil lances/s ÷ (2.100 × 70% de alvo) ≈ **7 tasks de 1 vCPU**, dentro do máximo de 10. Por isso a task é de 1 vCPU / 2 GB e a escala por requisições usa 90 mil req/min por task.
 - **Limite da máquina:** com 3 ou mais réplicas de 1 vCPU, elas, o nginx, o Valkey e o Postgres não cabem nos 4 núcleos físicos do sistema e aparecem descartes (4 réplicas a 6.800/s: 0 erros, 3% de 503). Acima disso, só com k6 distribuído contra o ALB.
 - **Achados do método:**
   - O healthcheck do Compose em `python -c` travava a task de 0,5 vCPU a cada check (p99 de 64 ms a 400/s; trocado por `bash`, 1 ms).
@@ -256,7 +235,7 @@ O script isola a CPU: o sistema fica nos núcleos físicos 0–3 e o k6 nos 4–
   - O consumer varria todos os streams a cada 20 ms; agora é avisado pelo Pub/Sub.
 - **Consistência após a carga:** no Postgres, seqs contíguos, zero violações de incremento e projeção igual ao último lance.
 
-Ryzen x86 não é Graviton ARM: os números locais servem para dimensionar e não substituem um teste na AWS. A extrapolação para o pico está em [`docs/finops.md`](docs/finops.md#3-cenário-de-pico-200-mil-usuários-50-mil-lancess-por-30-s).
+Ryzen x86 não é Graviton ARM: os números locais servem para dimensionar e não substituem um teste na AWS. A extrapolação para o pico está na seção 8.
 
 ## 7. Observabilidade
 
@@ -266,7 +245,7 @@ Ryzen x86 não é Graviton ARM: os números locais servem para dimensionar e nã
 | **Métricas** | `:8081/metrics` (Prometheus; porta interna, fora do nginx/ALB) + Prometheus/Grafana (profile `observability`) | Namespace `Auction` no CloudWatch via Embedded Metric Format: a cada minuto, linhas JSON no stdout que o CloudWatch Logs transforma em métricas, sem `PutMetricData`; mais as métricas nativas de ALB, ECS, ElastiCache e RDS |
 | **Traces** | — | Auto-instrumentação OpenTelemetry (FastAPI, redis, asyncpg) → sidecar ADOT → X-Ray, 5% de amostragem |
 | **Dashboard e alarmes** | Grafana | Dashboard `leilao-dev` + 10 alarmes → SNS e-mail |
-| **Health** | `/readyz` e `/livez` na porta pública (o readiness checa Valkey e Postgres); `:8081/health` com o detalhe por componente | Target group do ALB em `/readyz` |
+| **Health** | `/readyz` e `/livez` na porta pública (o readiness checa só o Valkey, para uma queda do Postgres não tirar as tasks do ALB); `:8081/health` com o detalhe por componente | Target group do ALB em `/readyz` |
 
 **Métricas de negócio:**
 - `auction.bids{outcome,reason}`
@@ -283,8 +262,6 @@ Ryzen x86 não é Graviton ARM: os números locais servem para dimensionar e nã
 - **Arquitetura básica:** ~US$ 128/mês; ~US$ 0,52 para 3 h de demo.
 - **Escolhas que mais economizam:** sem NAT (−US$ 33/mês), ALB em vez de API Gateway WebSocket (no pico, ~US$ 5 vs ~US$ 2.400 por leilão), Graviton (−20%), Spot no excedente, Valkey em vez de Redis OSS (−20%), RDS em vez de Aurora, SSM em vez de Secrets Manager, logs de 7 dias, traces a 5%, métricas sem alta cardinalidade.
 - **No pico (200 mil usuários, 50 mil lances/s):** ~US$ 60 por leilão. O custo dominante é a **saída de dados** dos snapshots, não o compute; as alavancas são o intervalo de conflation, compressão, deltas e CloudFront.
-
-Detalhes em [`docs/finops.md`](docs/finops.md).
 
 ## 9. Redundância, falhas e Disaster Recovery
 
@@ -338,7 +315,7 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 | Item | Custo aproximado | Para quê |
 |---|---|---|
 | CloudFront + AWS WAF | WAF ~US$ 5/mês + US$ 1/regra + US$ 0,60/milhão de requests | Rate limit por IP, Bot Control e Shield Standard incluso. Shield Advanced custa US$ 3 mil/mês e só se justifica com histórico de DDoS |
-| TLS no ALB (ACM) ou CloudFront | Certificado ACM grátis; CloudFront por GB | Senhas e tokens hoje trafegam em HTTP: ver `docs/analise-de-seguranca.md` (A1) |
+| TLS no ALB (ACM) ou CloudFront | Certificado ACM grátis; CloudFront por GB | Senhas e tokens hoje trafegam em HTTP: é o primeiro item antes de uso real |
 | NAT ou VPC endpoints + tasks em subnets privadas | Ver FinOps | Exigência típica de ambiente regulado |
 
 ### Evolução
@@ -369,8 +346,7 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 ├── docker-compose.yml            réplicas da app + nginx + Valkey + Postgres (+ Prometheus/Grafana)
 ├── infra/local/                  nginx, Prometheus, Grafana
 ├── infra/terraform/              bootstrap + módulos (network, alb, ecs, elasticache, rds, ecr, observability, budget) + envs/dev
-├── bruno/                        collection do Bruno: o fluxo completo contra a AWS, com testes
-├── load-test/                    k6/bid-storm.js, capacity.sh e results/
-├── scripts/                      smoke-test.sh, build-push.sh
-└── docs/                         arquitetura, ADRs, FinOps
+├── collection/                   collection do Bruno: o fluxo completo contra a AWS, com testes
+├── scripts/                      build-push.sh (imagem ARM64 para o ECR)
+└── arquitetura-aws.png           desenho da arquitetura AWS
 ```
