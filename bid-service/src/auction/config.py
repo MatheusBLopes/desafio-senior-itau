@@ -71,6 +71,11 @@ class Settings:
     cognito_client_id: str = ""
 
     json_logs: bool = False
+    # Nível dos logs da aplicação (bibliotecas de terceiros ficam sempre em WARNING).
+    log_level: str = "INFO"
+    # Uma linha por requisição (método, caminho, status, duração, usuário, leilão, resultado). Desligar só
+    # em teste de carga: a ~2.000 lances/s por task, são ~2.000 linhas/s no CloudWatch.
+    log_requests: bool = True
     # Exporta as métricas de negócio para o CloudWatch (namespace Auction) via Embedded Metric Format.
     cloudwatch_emf: bool = False
     metrics_namespace: str = "Auction"
@@ -95,6 +100,8 @@ class Settings:
                 per_ip_enabled=_bool("PER_IP_RATE_LIMIT_ENABLED", True),
             ),
             json_logs=_bool("JSON_LOGS", False),
+            log_level=_env("LOG_LEVEL", "INFO"),
+            log_requests=_bool("LOG_REQUESTS", True),
             auth_mode=_env("AUTH_MODE", "cognito"),
             cognito_region=_env("AWS_REGION", "us-east-1"),
             cognito_user_pool_id=_env("COGNITO_USER_POOL_ID", ""),

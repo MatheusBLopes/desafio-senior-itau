@@ -31,7 +31,7 @@ from .storage.valkey import RedisClock, create_pubsub_redis, create_redis
 
 @dataclass
 class Container:
-    """Todas as dependências da task, criadas uma vez no startup (o papel do contexto do Spring)."""
+    """Todas as dependências da task, criadas uma vez no startup"""
 
     settings: Settings
     redis: Redis

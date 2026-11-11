@@ -4,7 +4,9 @@ Os clientes se conectam em /ws/auctions/{id} e só escutam: o servidor nunca rep
 """
 
 import asyncio
+import logging
 import re
+import time
 import uuid
 from typing import Any
 
@@ -14,8 +16,11 @@ from fastapi import WebSocket, WebSocketDisconnect
 from ..core.money import from_cents
 from ..core.serialization import without_nulls
 from ..core.time import iso
+from ..observability.logs import bind, fields
 from ..observability.metrics import WEBSOCKET_SESSIONS
 from .cache import LiveAuctionCache, Snapshot
+
+log = logging.getLogger(__name__)
 
 SNAPSHOT = "AUCTION_SNAPSHOT"
 EXTENDED = "AUCTION_EXTENDED"
@@ -53,6 +58,8 @@ class _Subscriber:
         """Fila limitada a QUEUE_SIZE mensagens para esta conexão."""
         self.ws = ws
         self.queue: asyncio.Queue[str] = asyncio.Queue(self.QUEUE_SIZE)
+        self.sent = 0
+        self.close_reason: str | None = None
 
 
 class SnapshotBroadcaster:
@@ -103,15 +110,20 @@ class SnapshotBroadcaster:
                 # Cliente que não consome: desconecta em vez de acumular memória. Ele reconecta e
                 # recupera o que perdeu com GET /auctions/{id}/bids?afterSeq=.
                 subscribers.discard(subscriber)
+                subscriber.close_reason = "cliente lento (fila cheia)"
                 asyncio.ensure_future(subscriber.ws.close(code=1013, reason="cliente lento"))
 
     async def serve(self, ws: WebSocket, auction_id: str) -> None:
         """Atende uma conexão de /ws/auctions/{id} até ela fechar."""
         if not _UUID.match(auction_id):
+            log.info("WebSocket recusado: o caminho não é um leilão", extra=fields(path=ws.url.path))
             await ws.close(code=1008, reason="destino não permitido")
             return
         await ws.accept()
         parsed_id = uuid.UUID(auction_id)
+        bind(auctionId=parsed_id)
+        log.info("WebSocket aberto")
+        opened = time.monotonic()
         subscriber = _Subscriber(ws)
         self._subscribers.setdefault(parsed_id, set()).add(subscriber)
         WEBSOCKET_SESSIONS.inc()
@@ -123,11 +135,15 @@ class SnapshotBroadcaster:
             # Clientes só escutam. Qualquer mensagem recebida (como um AUCTION_CLOSED forjado) fecha a conexão.
             message = await ws.receive()
             if message["type"] != "websocket.disconnect":
+                subscriber.close_reason = "cliente tentou publicar (código 1008)"
                 await ws.close(code=1008, reason="clientes não publicam eventos")
         except (WebSocketDisconnect, RuntimeError):
             pass  # cliente saiu, ou a conexão já foi fechada pelo servidor (cliente lento)
         finally:
             writer.cancel()
+            log.info("WebSocket fechado", extra=fields(
+                reason=subscriber.close_reason or "cliente saiu", messagesSent=subscriber.sent,
+                durationS=round(time.monotonic() - opened, 1)))
             subscribers = self._subscribers.get(parsed_id)
             if subscribers is not None:
                 subscribers.discard(subscriber)
@@ -141,5 +157,6 @@ class SnapshotBroadcaster:
         try:
             while True:
                 await subscriber.ws.send_text(await subscriber.queue.get())
+                subscriber.sent += 1
         except Exception:
             pass  # a conexão caiu; o loop de leitura faz a limpeza

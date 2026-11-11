@@ -13,6 +13,7 @@ import jwt
 from jwt.algorithms import RSAAlgorithm
 
 from ..core.errors import ApiError
+from ..observability.logs import bind, fields
 
 log = logging.getLogger(__name__)
 
@@ -120,12 +121,12 @@ class JwtVerifier:
         except jwt.ExpiredSignatureError:
             raise ApiError.unauthorized("token expirado") from None
         except jwt.PyJWTError as e:
-            log.info("token recusado: %s", e)  # o detalhe fica no log; o cliente recebe uma mensagem genérica
+            bind(authError=str(e))  # o detalhe vai para o log da requisição; o cliente recebe uma mensagem genérica
             raise ApiError.unauthorized("token inválido") from None
         if claims["token_use"] != "access":
             raise ApiError.unauthorized("use o access token, não o id token")
         if claims["client_id"] != self._client_id or not USER_ID.match(str(claims["username"])):
-            log.info("token recusado: client_id ou username inesperado")
+            bind(authError="client_id ou username inesperado")
             raise ApiError.unauthorized("token inválido")
         return claims
 
@@ -152,7 +153,7 @@ class JwtVerifier:
             try:
                 jwks = await self._jwks.fetch()
             except Exception as e:
-                log.warning("falha ao buscar o JWKS do Cognito: %s", e)
+                log.warning("falha ao buscar as chaves do Cognito (JWKS)", extra=fields(error=e))
                 self._fetch_failed = True
                 self._last_refresh = float("-inf")  # tenta de novo na próxima requisição
                 return

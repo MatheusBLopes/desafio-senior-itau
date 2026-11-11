@@ -9,6 +9,7 @@ from fastapi.responses import Response
 
 from ..bidding.result import parse_amount
 from ..core.errors import ApiError
+from ..core.money import from_cents
 from ..observability.logs import bind
 from .request_helpers import container_of, request_client_ip
 from .responses import json_response
@@ -27,14 +28,21 @@ async def place_bid(auction_id: uuid.UUID, request: Request) -> Response:
     """
     headers = request.headers
     container = container_of(request)
+    bind(auctionId=auction_id)
     user_id = await container.auth.user_of(headers)
     bind(userId=user_id)
     key = headers.get("idempotency-key") or ""
     if not IDEMPOTENCY_KEY.match(key):
         raise ApiError.bad_request("Idempotency-Key: use 1 a 128 caracteres [A-Za-z0-9_.:-]")
+    bind(idempotencyKey=key)
     amount = parse_amount(await request.body())
+    bind(amount=from_cents(amount))
     container.ip_limiter.check(request_client_ip(request))
     result = await container.bids.place(auction_id, user_id, key, amount)
+    # O resultado entra na linha de log da requisição: é o que se procura ao rastrear um lance.
+    bind(outcome=result.outcome, replayed=result.replayed, filtered=result.filtered)
+    if result.reason is not None:
+        bind(reason=result.reason)
     return json_response(result.to_json(), result.http_status(),
                          {"Idempotent-Replayed": "true" if result.replayed else "false"})
 
@@ -47,4 +55,5 @@ async def list_bids(
         limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> Response:
     """Lances aceitos com seq > afterSeq, em ordem: é como o cliente recupera o que a conflation pulou."""
+    bind(auctionId=auction_id, afterSeq=afterSeq)
     return json_response(await container_of(request).bid_history.list_after(auction_id, afterSeq, limit))

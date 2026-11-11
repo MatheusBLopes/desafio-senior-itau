@@ -12,6 +12,7 @@ from redis.exceptions import OutOfMemoryError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from ..core.errors import ApiError
+from ..observability.logs import bind
 from .responses import RETRY_SOON, error_response, format_validation_errors
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ def _unavailable(level: int, log_message: str) -> Callable[[Request, Exception],
     """Handler que registra a falha no nível dado e responde 503 UNAVAILABLE com Retry-After: 1."""
     async def handler(_: Request, error: Exception) -> Response:
         """Registra a exceção e responde 503 com Retry-After."""
+        bind(errorCode="UNAVAILABLE")
         log.log(level, log_message, error)
         return error_response(503, "UNAVAILABLE", "tente de novo em instantes", RETRY_SOON)
 
@@ -47,12 +49,14 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(ApiError)
     async def api_error(_: Request, error: ApiError) -> Response:
-        """Erro esperado: devolve o status e o código que o próprio erro carrega."""
+        """Erro esperado: devolve o status e o código que o próprio erro carrega (o código vai para o log)."""
+        bind(errorCode=error.code)
         return error_response(error.status, error.code, error.message)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, error: RequestValidationError) -> Response:
         """Parâmetro de path ou query inválido (ex.: id que não é UUID, afterSeq negativo): 400."""
+        bind(errorCode="INVALID_REQUEST")
         return error_response(400, "INVALID_REQUEST", format_validation_errors(error.errors(), from_request=True))
 
     for exception_class, level, log_message in _UNAVAILABLE:
@@ -61,5 +65,6 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def unexpected(_: Request, error: Exception) -> Response:
         """Qualquer outra falha: registra o stack trace e responde 500 sem detalhes."""
+        bind(errorCode="INTERNAL_ERROR")
         log.exception("erro inesperado")
         return error_response(500, "INTERNAL_ERROR", "erro interno")

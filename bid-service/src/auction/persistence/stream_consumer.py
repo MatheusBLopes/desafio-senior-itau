@@ -12,6 +12,7 @@ from redis.exceptions import ResponseError
 from ..config import Settings
 from ..lifecycle.repository import AuctionRepository
 from ..lifecycle.state_loader import AuctionStateLoader
+from ..observability.logs import fields
 from ..observability.metrics import STREAM_BACKLOG, Metrics
 from ..storage import keys
 from .persister import BidPersister, StreamRecord
@@ -83,7 +84,7 @@ class BidStreamConsumer:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("falha no consumer do stream, tentando de novo: %s", e)
+                log.warning("falha no consumer do stream; tentando de novo em 1 s", extra=fields(error=e))
                 await asyncio.sleep(1)
 
     async def _collect_targets(self, sweep: bool) -> tuple[set[uuid.UUID], set[str]]:
@@ -112,7 +113,8 @@ class BidStreamConsumer:
                 failed = True
                 self._retry.add(auction_id)
                 self._dirty.add(auction_id)
-                log.warning("falha ao persistir o stream do leilão %s: %s", auction_id, e)
+                log.warning("falha ao gravar lances no banco; o lote será relido",
+                            extra=fields(auctionId=auction_id, error=e))
         return failed
 
     async def _wait_for_work(self, failed: bool) -> None:
@@ -132,7 +134,7 @@ class BidStreamConsumer:
         for member in members:
             auction_id = keys.auction_id_or_none(member)
             if auction_id is None:
-                log.warning("membro inválido removido de %s: %s", keys.ACTIVE_STREAMS, member)
+                log.warning("entrada inválida removida da lista de streams", extra=fields(member=member))
                 await self._redis.srem(keys.ACTIVE_STREAMS, member)
             else:
                 auction_ids.add(auction_id)
@@ -163,10 +165,17 @@ class BidStreamConsumer:
         """Grava o lote e só depois confirma (XACK); havendo colisão, alinha o Valkey com o banco."""
         collided = await self._persister.persist(auction_id, records)
         await self._redis.xack(stream, self._settings.consumer_group, *[record_id for record_id, _ in records])
+        seqs = [int(record["seq"]) for _, record in records if record.get("type") == "BID"]
+        closed = any(record.get("type") == "CLOSED" for _, record in records)
+        if seqs:
+            log.info("lances gravados no banco" + (" com o encerramento" if closed else ""), extra=fields(
+                auctionId=auction_id, count=len(seqs), firstSeq=min(seqs), lastSeq=max(seqs), closed=closed))
+        elif closed:
+            log.info("encerramento do leilão gravado no banco", extra=fields(auctionId=auction_id))
         if collided:
             self._metrics.conflicts(collided)
-            log.error("%s lances aceitos colidiram com outros já gravados e foram para bid_conflicts auctionId=%s",
-                      collided, auction_id)
+            log.error("lances aceitos colidiram com outros já gravados e foram para bid_conflicts",
+                      extra=fields(auctionId=auction_id, count=collided))
             # Se o Valkey ficou atrás do banco (failover), alcança o banco antes de aceitar mais lances.
             await self._loader.load_id(auction_id)
 
@@ -193,7 +202,7 @@ class BidStreamConsumer:
                     await self._redis.expire(stream, retention_s)
                     await self._redis.expire(keys.auction_key(auction_id), retention_s)
             except Exception as e:
-                log.debug("manutenção do stream %s falhou: %s", stream, e)
+                log.debug("manutenção do stream falhou", extra=fields(stream=stream, error=e))
         STREAM_BACKLOG.set(total)
 
     async def _claim_stale(self, auction_id: uuid.UUID, stream: str) -> None:
@@ -209,7 +218,8 @@ class BidStreamConsumer:
                                            [pending["message_id"] for pending in stale])
         claimed = [record for record in claimed if record[1]]  # entradas já cortadas pelo MAXLEN vêm sem campos
         if claimed:
-            log.info("reivindicados %s eventos pendentes de outro consumer auctionId=%s", len(claimed), auction_id)
+            log.info("eventos pendentes de outra task assumidos por esta",
+                     extra=fields(auctionId=auction_id, count=len(claimed)))
             await self._persist_and_ack(auction_id, stream, claimed)
 
     async def _undelivered(self, stream: str, last_delivered_id: str) -> int:

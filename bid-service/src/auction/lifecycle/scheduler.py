@@ -8,6 +8,9 @@ from redis.asyncio import Redis
 
 from ..config import Settings
 from ..core.errors import ApiError
+from ..core.money import from_cents
+from ..core.time import iso
+from ..observability.logs import fields
 from ..storage import keys
 from ..storage.scripts import LuaScripts
 from ..storage.valkey import RedisClock
@@ -46,7 +49,7 @@ class AuctionCloser:
         try:
             due = await self._redis.zrangebyscore(keys.ENDING, 0, await self._clock.now_ms(), start=0, num=100)
         except Exception as e:
-            log.warning("falha ao buscar leilões vencidos: %s", e)
+            log.warning("falha ao buscar leilões vencidos", extra=fields(error=e))
             return
         for member in due:
             auction_id = keys.auction_id_or_none(member)
@@ -57,16 +60,16 @@ class AuctionCloser:
                 await self.close(auction_id)
             except ApiError as e:
                 if e.status != 404:
-                    log.warning("falha ao encerrar o leilão %s: %s", auction_id, e)
+                    log.warning("falha ao encerrar o leilão", extra=fields(auctionId=auction_id, error=e))
                     continue
                 # Ex.: banco restaurado de um backup anterior à criação do leilão (DR).
                 await self._remove_orphan(member, "não existe no Postgres")
             except Exception as e:
-                log.warning("falha ao encerrar o leilão %s: %s", auction_id, e)
+                log.warning("falha ao encerrar o leilão", extra=fields(auctionId=auction_id, error=e))
 
     async def _remove_orphan(self, member: str, reason: str) -> None:
         """Tira do ZSET uma entrada que nunca vai encerrar, para ela não travar o ciclo."""
-        log.warning("entrada órfã removida de %s: %s (%s)", keys.ENDING, member, reason)
+        log.warning("entrada órfã removida da agenda de encerramento", extra=fields(member=member, reason=reason))
         await self._redis.zrem(keys.ENDING, member)
 
     async def close(self, auction_id: uuid.UUID) -> None:
@@ -74,15 +77,26 @@ class AuctionCloser:
         outcome_kind, ends_at = await self._scripts.close_auction(auction_id)
         if outcome_kind == "CLOSED":
             await self._redis.zrem(keys.ENDING, str(auction_id))
-            log.info("leilão encerrado auctionId=%s", auction_id)
+            await self._log_closed(auction_id, ends_at)
         elif outcome_kind == "ALREADY_CLOSED":
             await self._redis.zrem(keys.ENDING, str(auction_id))
         elif outcome_kind == "PENDING":
             await self._redis.zadd(keys.ENDING, {str(auction_id): ends_at})
+            log.info("encerramento adiado: prazo prorrogado por lance no fim",
+                     extra=fields(auctionId=auction_id, endsAt=iso(ends_at)))
         elif outcome_kind == "NOT_LOADED":
             await self._loader.load_id(auction_id)
         else:
-            log.warning("resposta inesperada do close_auction.lua: %s", outcome_kind)
+            log.warning("resposta inesperada do close_auction.lua",
+                        extra=fields(auctionId=auction_id, kind=outcome_kind))
+
+    async def _log_closed(self, auction_id: uuid.UUID, ends_at: int) -> None:
+        """Registra o encerramento com o vencedor. Só a task que encerrou chega aqui: uma linha por leilão."""
+        leader, price, seq = await self._redis.hmget(keys.auction_key(auction_id), "leaderId", "currentPrice", "seq")
+        bids = int(seq or 0)
+        log.info("leilão encerrado", extra=fields(
+            auctionId=auction_id, endsAt=iso(ends_at), acceptedBids=bids,
+            winnerId=leader if bids else None, finalPrice=from_cents(int(price)) if bids else None))
 
 
 class AuctionReconciler:
@@ -113,6 +127,6 @@ class AuctionReconciler:
                 if auction is not None and await self._loader.load(auction):
                     reloaded += 1
             if reloaded:
-                log.warning("%s leilões abertos foram recarregados no Valkey a partir do Postgres", reloaded)
+                log.warning("leilões abertos recarregados no Valkey a partir do Postgres", extra=fields(count=reloaded))
         except Exception as e:
-            log.warning("falha na reconciliação: %s", e)
+            log.warning("falha na reconciliação", extra=fields(error=e))

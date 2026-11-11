@@ -9,10 +9,10 @@ from fastapi import FastAPI
 
 from .api import auction_routes, auth_routes, bid_routes, health_routes, realtime_routes
 from .api.error_handlers import register_error_handlers
-from .api.middleware import LoadShedder, PortSeparation
+from .api.middleware import LoadShedder, PortSeparation, RequestLogger
 from .config import Settings
 from .container import build, shutdown, start_background
-from .observability.logs import configure_logging
+from .observability.logs import configure_logging, fields
 
 log = logging.getLogger(__name__)
 
@@ -29,13 +29,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         start_background(container)
         # Pronto só depois de assinar o Pub/Sub: senão o cache do pré-filtro nasceria cego.
         await asyncio.wait_for(container.listener.subscribed.wait(), timeout=10)
-        log.info("bid-service pronto na porta %s (gestão em %s)", settings.port, settings.management_port)
+        log.info("bid-service pronto", extra=fields(
+            port=settings.port, managementPort=settings.management_port, authMode=settings.auth_mode,
+            maxInFlight=settings.max_in_flight, rateLimit=settings.rate_limit.enabled,
+            logRequests=settings.log_requests))
         yield
         await shutdown(container)
+        log.info("bid-service encerrado")
 
     app = FastAPI(title="bid-service", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.management_ports = {settings.management_port}
+    # Ordem de execução: LoadShedder → RequestLogger → PortSeparation → rotas (o último adicionado roda primeiro).
     app.add_middleware(PortSeparation)
+    # Abre o contexto de log antes de tudo que pode responder; o excesso recusado pelo LoadShedder não gera
+    # linha (seria uma por requisição justamente na sobrecarga) e é contado na métrica auction.requests.shed.
+    app.add_middleware(RequestLogger, enabled=settings.log_requests)
     # Adicionado por último = executa primeiro: rejeitar o excesso deve ser o caminho mais barato.
     app.add_middleware(LoadShedder, max_in_flight=settings.max_in_flight)
 
@@ -46,5 +54,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def configure(settings: Settings) -> None:
-    """Configuração do processo que vem antes da aplicação (hoje, só o formato dos logs)."""
-    configure_logging(settings.json_logs)
+    """Configuração do processo que vem antes da aplicação (hoje, só os logs)."""
+    configure_logging(settings.json_logs, settings.log_level)

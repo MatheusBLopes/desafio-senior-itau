@@ -84,37 +84,47 @@ class Metrics:
     def emf_lines(self, namespace: str) -> list[bytes]:
         """Drena o intervalo em linhas EMF: o CloudWatch Logs extrai as métricas, sem PutMetricData.
 
-        Os nomes e dimensões são os que os alarmes e o dashboard do Terraform consultam.
+        Os nomes e dimensões são os que os alarmes e o dashboard do Terraform consultam. Para não encher o
+        log da aplicação, as métricas com as mesmas dimensões vão na mesma linha, e um intervalo sem nenhuma
+        atividade (tudo zero, nenhum lance) não gera linha: os alarmes tratam a ausência como "sem problema".
         """
         now = int(time.time() * 1000)
         app = {"application": "bid-service"}
 
-        def emf(name: str, value: float, unit: str, **dims: str) -> bytes:
-            """Uma linha EMF com uma métrica e suas dimensões."""
+        def emf(values: dict[str, float], unit: str, **dims: str) -> bytes:
+            """Uma linha EMF com várias métricas que compartilham as mesmas dimensões."""
             dimensions = {**app, **dims}
             return orjson.dumps({
                 "_aws": {"Timestamp": now, "CloudWatchMetrics": [{
                     "Namespace": namespace, "Dimensions": [list(dimensions)],
-                    "Metrics": [{"Name": name, "Unit": unit}]}]},
-                **dimensions, name: value,
+                    "Metrics": [{"Name": name, "Unit": unit} for name in values]}]},
+                **dimensions, **values,
             })
 
-        lines = [emf("auction.bids.count", count, "Count", outcome=outcome, reason=reason)
+        lines = [emf({"auction.bids.count": count}, "Count", outcome=outcome, reason=reason)
                  for (outcome, reason), count in self._outcomes.items()]
+        had_bids = bool(self._outcomes)
         self._outcomes.clear()
-        lines.append(emf("auction.persist.conflicts.count", self._conflicts, "Count"))
+
+        shed_total = REQUESTS_SHED._value.get()
+        totals = {
+            "auction.persist.conflicts.count": self._conflicts,
+            "auction.requests.shed.count": shed_total - self._shed_reported,
+            "auction.stream.backlog": STREAM_BACKLOG._value.get(),
+            "auction.websocket.sessions": WEBSOCKET_SESSIONS._value.get(),
+        }
         self._conflicts = 0
-        lines.append(emf("auction.requests.shed.count", REQUESTS_SHED._value.get() - self._shed_reported, "Count"))
-        self._shed_reported = REQUESTS_SHED._value.get()
-        lines.append(emf("auction.stream.backlog", STREAM_BACKLOG._value.get(), "Count"))
-        lines.append(emf("auction.websocket.sessions", WEBSOCKET_SESSIONS._value.get(), "Count"))
-        for name, reservoir in (("auction.bid.latency.percentile", self._bid),
-                                ("auction.lua.latency.percentile", self._lua)):
-            values = reservoir.drain()
-            for phi in ("0.5", "0.95", "0.99"):
-                if values:
-                    value = values[min(len(values) - 1, int(float(phi) * len(values)))]
-                    lines.append(emf(name, value, "Seconds", phi=phi))
+        self._shed_reported = shed_total
+        if had_bids or any(totals.values()):
+            lines.append(emf(totals, "Count"))
+
+        samples = {"auction.bid.latency.percentile": self._bid.drain(),
+                   "auction.lua.latency.percentile": self._lua.drain()}
+        for phi in ("0.5", "0.95", "0.99"):
+            values = {name: data[min(len(data) - 1, int(float(phi) * len(data)))]
+                      for name, data in samples.items() if data}
+            if values:
+                lines.append(emf(values, "Seconds", phi=phi))
         return lines
 
 

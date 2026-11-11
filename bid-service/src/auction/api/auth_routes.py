@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from ..auth.authenticator import validate_credentials
+from ..observability.logs import bind
 from .request_helpers import container_of, read_json, request_client_ip
 from .responses import json_response
 
@@ -16,6 +17,7 @@ async def signup(request: Request) -> Response:
     container = container_of(request)
     container.ip_limiter.check(request_client_ip(request))
     username, password = validate_credentials(await read_json(request))
+    bind(userId=username)
     await container.auth.identity_provider().sign_up(username, password)
     return json_response({"username": username}, 201)
 
@@ -26,4 +28,5 @@ async def login(request: Request) -> Response:
     container = container_of(request)
     container.ip_limiter.check(request_client_ip(request))
     username, password = validate_credentials(await read_json(request))
+    bind(userId=username)
     return json_response(await container.auth.identity_provider().login(username, password))

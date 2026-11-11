@@ -2,6 +2,10 @@
 # Na AWS (OTEL_ENABLED=true) o processo sobe com a auto-instrumentação OpenTelemetry: traces de
 # FastAPI, redis e asyncpg vão para o sidecar ADOT, que envia ao X-Ray. Localmente, sem overhead.
 set -e
+# Com argumentos, roda só o comando pedido (ex.: uma task avulsa de manutenção no ECS) em vez da API.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
 if [ "${OTEL_ENABLED:-false}" = "true" ]; then
   exec opentelemetry-instrument python -m auction
 fi

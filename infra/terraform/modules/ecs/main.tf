@@ -23,6 +23,65 @@ resource "aws_cloudwatch_log_group" "app" {
   retention_in_days = var.log_retention_days
 }
 
+# Logs do sidecar ADOT (startup e telemetria do próprio coletor) num grupo separado e de retenção curta:
+# o grupo da aplicação fica só com os logs do bid-service e as métricas EMF.
+resource "aws_cloudwatch_log_group" "adot" {
+  name              = "/ecs/${var.name}/adot"
+  retention_in_days = 1
+}
+
+# Consultas prontas no CloudWatch Logs Insights (grátis; pagas só quando executadas, por GB lido).
+# No console: CloudWatch → Logs Insights → Consultas salvas → pasta com o nome do ambiente.
+locals {
+  log_queries = {
+    "1 - Logs da aplicação (sem métricas)"                = <<-EOT
+      fields @timestamp, level, message, requestId, userId, auctionId
+      | filter ispresent(level)
+      | sort @timestamp desc
+      | limit 200
+    EOT
+    "2 - Requisições"                                     = <<-EOT
+      fields @timestamp, status, method, route, durationMs, userId, auctionId, amount, outcome, reason, errorCode, requestId
+      | filter logger = "api.access"
+      | sort @timestamp desc
+      | limit 200
+    EOT
+    "3 - Erros e avisos"                                  = <<-EOT
+      fields @timestamp, level, message, errorCode, error, requestId, auctionId, logger
+      | filter level in ["WARNING", "ERROR"]
+      | sort @timestamp desc
+      | limit 200
+    EOT
+    "4 - Rastrear uma requisição (troque o X-Request-Id)" = <<-EOT
+      fields @timestamp, level, message, logger, @message
+      | filter requestId = "COLE-AQUI-O-X-REQUEST-ID"
+      | sort @timestamp asc
+    EOT
+    "5 - Linha do tempo de um leilão (troque o id)"       = <<-EOT
+      fields @timestamp, level, message, userId, amount, outcome, reason, seq, winnerId, finalPrice
+      | filter auctionId = "COLE-AQUI-O-ID-DO-LEILAO"
+      | sort @timestamp asc
+    EOT
+    "6 - Lances por resultado"                            = <<-EOT
+      filter logger = "api.access" and route = "/auctions/{auction_id}/bids"
+      | stats count(*) as lances by status, outcome, reason, errorCode
+      | sort lances desc
+    EOT
+    "7 - Latência por rota"                               = <<-EOT
+      filter logger = "api.access"
+      | stats count(*) as requisicoes, avg(durationMs) as media_ms, pct(durationMs, 99) as p99_ms by method, route
+      | sort requisicoes desc
+    EOT
+  }
+}
+
+resource "aws_cloudwatch_query_definition" "app" {
+  for_each        = local.log_queries
+  name            = "${var.name}/${each.key}"
+  log_group_names = [aws_cloudwatch_log_group.app.name]
+  query_string    = each.value
+}
+
 # --- IAM ---------------------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "assume_ecs_tasks" {
@@ -168,7 +227,7 @@ resource "aws_ecs_task_definition" "app" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-group         = aws_cloudwatch_log_group.adot.name
           awslogs-region        = data.aws_region.current.region
           awslogs-stream-prefix = "adot"
         }

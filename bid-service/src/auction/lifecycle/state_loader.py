@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 
 from ..config import Settings
 from ..core.time import from_datetime
+from ..observability.logs import fields
 from ..storage import keys
 from ..storage.scripts import LuaScripts
 from .models import OPEN, Auction
@@ -57,7 +58,8 @@ class AuctionStateLoader:
             extend_by_ms=auction.anti_sniping_extend_ms)
 
         if result == self.CAUGHT_UP:
-            log.warning("Valkey estava atrás do Postgres e foi corrigido auctionId=%s seq=%s", auction.id, seq)
+            log.warning("Valkey estava atrás do Postgres e foi alinhado ao banco",
+                        extra=fields(auctionId=auction.id, seq=seq))
             return True
         if result != self.LOADED:
             return False
@@ -69,5 +71,6 @@ class AuctionStateLoader:
         else:
             await self._redis.expire(keys.auction_key(auction.id), retention_s)
             await self._redis.expire(keys.stream_key(auction.id), retention_s)
-        log.info("estado do leilão carregado no Valkey auctionId=%s status=%s seq=%s", auction.id, auction.status, seq)
+        log.info("estado do leilão carregado no Valkey",
+                 extra=fields(auctionId=auction.id, status=auction.status, seq=seq))
         return True

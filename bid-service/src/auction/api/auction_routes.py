@@ -1,5 +1,6 @@
 """Rotas de leilão: POST /auctions e GET /auctions/{id}."""
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Request
@@ -8,9 +9,11 @@ from pydantic import ValidationError
 
 from ..core.errors import ApiError
 from ..lifecycle.models import CreateAuctionRequest
-from ..observability.logs import bind
+from ..observability.logs import bind, fields
 from .request_helpers import container_of, read_json
 from .responses import format_validation_errors, json_response
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -27,10 +30,14 @@ async def create_auction(request: Request) -> Response:
     except ValidationError as e:
         raise ApiError.bad_request(format_validation_errors(e.errors(), from_request=False)) from None
     view = await container.auctions.create(body)
+    bind(auctionId=view["id"])
+    log.info("leilão criado", extra=fields(title=view["title"], startingPrice=view["startingPrice"],
+                                           minIncrement=view["minIncrement"], endsAt=view["endsAt"]))
     return json_response(view, 201, {"Location": f"/auctions/{view['id']}"})
 
 
 @router.get("/auctions/{auction_id}")
 async def get_auction(auction_id: uuid.UUID, request: Request) -> Response:
     """Estado vivo do leilão: preço, líder, seq, próximo mínimo, prazo e, se encerrado, vencedor."""
+    bind(auctionId=auction_id)
     return json_response(await container_of(request).auctions.get(auction_id))

@@ -8,6 +8,7 @@ from collections.abc import Callable
 import orjson
 from redis.asyncio import Redis
 
+from ..observability.logs import fields
 from .broadcaster import CLOSED, EXTENDED, SnapshotBroadcaster
 from .cache import LiveAuctionCache, Snapshot
 
@@ -48,7 +49,7 @@ class AuctionEventListener:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("Pub/Sub desconectado, reconectando: %s", e)
+                log.warning("Pub/Sub desconectado; reconectando em 1 s", extra=fields(error=e))
                 await asyncio.sleep(1)
             finally:
                 await pubsub.aclose()
@@ -75,4 +76,4 @@ class AuctionEventListener:
                 self._broadcaster.send_now(CLOSED, snapshot)
                 self._on_stream_event(snapshot.auction_id)
         except Exception as e:
-            log.warning("evento inválido no Pub/Sub: %s", e)
+            log.warning("evento inválido no Pub/Sub", extra=fields(error=e))

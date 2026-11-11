@@ -5,6 +5,7 @@ import logging
 from typing import Any, Protocol
 
 from ..core.errors import ApiError
+from ..observability.logs import fields
 from .tokens import CognitoConfig
 
 log = logging.getLogger(__name__)
@@ -78,5 +79,5 @@ def cognito_error(code: str, message: str) -> ApiError:
         return ApiError.unauthorized("usuário ou senha inválidos")
     if code in ("TooManyRequestsException", "LimitExceededException", "TooManyFailedAttemptsException"):
         return ApiError(429, "RATE_LIMITED", "muitas tentativas, tente de novo em instantes")
-    log.error("erro inesperado do Cognito: %s %s", code, message)
+    log.error("erro inesperado do Cognito", extra=fields(code=code, error=message))
     return ApiError.unavailable("serviço de identidade indisponível")

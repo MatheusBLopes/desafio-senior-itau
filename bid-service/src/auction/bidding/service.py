@@ -48,7 +48,6 @@ class BidService:
                 self._metrics.outcome(result.outcome, result.reason)
             if result.accepted:
                 bind(seq=result.seq)
-                log.debug("lance aceito amount=%s", amount)
             return result
         finally:
             self._metrics.bid_latency(time.perf_counter() - start)

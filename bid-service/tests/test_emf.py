@@ -10,6 +10,21 @@ from auction.observability.metrics import Metrics
 TERRAFORM = Path(__file__).resolve().parents[2] / "infra/terraform/modules/observability/main.tf"
 
 
+def emitted_by_name(lines: list[bytes]) -> dict[str, list[dict]]:
+    """Agrupa as linhas EMF pelo nome de cada métrica que elas carregam (uma linha pode ter várias)."""
+    emitted: dict[str, list[dict]] = {}
+    for raw in lines:
+        line = orjson.loads(raw)
+        spec = line["_aws"]["CloudWatchMetrics"][0]
+        assert spec["Namespace"] == "Auction"
+        assert line["application"] == "bid-service"
+        assert all(d in line for d in spec["Dimensions"][0])  # cada dimensão tem valor na linha
+        for metric in spec["Metrics"]:
+            assert metric["Name"] in line  # cada métrica tem valor na linha
+            emitted.setdefault(metric["Name"], []).append(line)
+    return emitted
+
+
 def test_emf_lines_match_the_metrics_used_by_alarms_and_dashboard():
     m = Metrics()
     m.outcome("ACCEPTED", None)
@@ -18,15 +33,7 @@ def test_emf_lines_match_the_metrics_used_by_alarms_and_dashboard():
     m.bid_latency(0.002)
     m.lua_latency(0.001)
 
-    lines = [orjson.loads(line) for line in m.emf_lines("Auction")]
-    emitted = {}
-    for line in lines:
-        spec = line["_aws"]["CloudWatchMetrics"][0]
-        assert spec["Namespace"] == "Auction"
-        name = spec["Metrics"][0]["Name"]
-        assert line["application"] == "bid-service"
-        assert all(d in line for d in spec["Dimensions"][0])  # cada dimensão tem valor na linha
-        emitted.setdefault(name, []).append(line)
+    emitted = emitted_by_name(m.emf_lines("Auction"))
 
     # Todo nome do namespace Auction citado no Terraform é emitido.
     referenced = set(re.findall(r'"(auction\.[a-z.]+)"', TERRAFORM.read_text()))
@@ -38,8 +45,11 @@ def test_emf_lines_match_the_metrics_used_by_alarms_and_dashboard():
     assert emitted["auction.persist.conflicts.count"][0]["auction.persist.conflicts.count"] == 1
     assert {l["phi"] for l in emitted["auction.bid.latency.percentile"]} == {"0.5", "0.95", "0.99"}
 
+    # Intervalo sem atividade: nenhuma linha (os alarmes tratam a ausência como "sem problema").
+    assert m.emf_lines("Auction") == []
+
     # O intervalo seguinte começa do zero.
-    again = {orjson.loads(x)["_aws"]["CloudWatchMetrics"][0]["Metrics"][0]["Name"]: orjson.loads(x)
-             for x in m.emf_lines("Auction")}
-    assert again["auction.persist.conflicts.count"]["auction.persist.conflicts.count"] == 0
-    assert "auction.bids.count" not in again
+    m.outcome("ACCEPTED", None)
+    again = emitted_by_name(m.emf_lines("Auction"))
+    assert again["auction.persist.conflicts.count"][0]["auction.persist.conflicts.count"] == 0
+    assert again["auction.bids.count"][0]["auction.bids.count"] == 1
