@@ -1,0 +1,31 @@
+meta {
+  name: Mesma key com outro valor (422)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAna}}
+}
+
+headers {
+  Idempotency-Key: {{chaveAna}}
+}
+
+body:json {
+  {
+    "amount": "500.00"
+  }
+}
+
+tests {
+  test("key reutilizada é recusada", () => {
+    expect(res.status).to.equal(422);
+  });
+}

@@ -1,0 +1,31 @@
+meta {
+  name: Login Bia
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/auth/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{biaUser}}",
+    "password": "{{senha}}"
+  }
+}
+
+script:post-response {
+  if (res.status === 200) {
+    bru.setVar("tokenBia", res.body.accessToken);
+  }
+}
+
+tests {
+  test("token da Bia", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.accessToken).to.be.a("string");
+  });
+}

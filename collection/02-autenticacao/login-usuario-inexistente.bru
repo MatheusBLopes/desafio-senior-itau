@@ -1,0 +1,25 @@
+meta {
+  name: Login de usuário inexistente (401)
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/auth/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "ninguem-{{sufixo}}",
+    "password": "qualquer-senha-1"
+  }
+}
+
+tests {
+  test("mesma resposta da senha errada", () => {
+    expect(res.status).to.equal(401);
+    expect(res.body.message).to.equal("usuário ou senha inválidos");
+  });
+}

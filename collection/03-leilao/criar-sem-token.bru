@@ -1,0 +1,28 @@
+meta {
+  name: Criar leilão sem token (401)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/auctions
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "title": "Sem token"
+  }
+}
+
+tests {
+  test("autentica antes de validar o corpo", () => {
+    expect(res.status).to.equal(401);
+  });
+}
+
+docs {
+  O corpo está incompleto de propósito: sem token, a resposta é 401, e não um 400 que revelaria o
+  formato esperado.
+}

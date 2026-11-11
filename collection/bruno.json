@@ -1,0 +1,6 @@
+{
+  "version": "1",
+  "name": "Leilão em tempo real",
+  "type": "collection",
+  "ignore": ["node_modules", ".git"]
+}

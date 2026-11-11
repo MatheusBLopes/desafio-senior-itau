@@ -1,0 +1,32 @@
+meta {
+  name: Lance depois do fim (422)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenBia}}
+}
+
+headers {
+  Idempotency-Key: k-fim-{{sufixo}}
+}
+
+body:json {
+  {
+    "amount": "999.00"
+  }
+}
+
+tests {
+  test("leilão fechado não aceita lance", () => {
+    expect(res.status).to.equal(422);
+    expect(res.body.reason).to.equal("AUCTION_CLOSED");
+  });
+}

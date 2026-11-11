@@ -1,0 +1,25 @@
+meta {
+  name: Consultar leilão
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/auctions/{{auctionId}}
+  body: none
+  auth: none
+}
+
+tests {
+  test("estado vivo vindo do Valkey", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.id).to.equal(bru.getVar("auctionId"));
+    expect(res.body.title).to.equal("Guitarra Fender 1965");
+    expect(res.body.serverTime).to.be.a("string");
+  });
+}
+
+docs {
+  Leitura pública. `serverTime` é o relógio do Valkey: use-o (e não o relógio do cliente) para o
+  contador regressivo até `endsAt`.
+}

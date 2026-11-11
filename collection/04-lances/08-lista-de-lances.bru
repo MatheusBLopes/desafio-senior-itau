@@ -1,0 +1,28 @@
+meta {
+  name: Histórico de lances
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids?afterSeq=0&limit=100
+  body: none
+  auth: none
+}
+
+params:query {
+  afterSeq: 0
+  limit: 100
+}
+
+tests {
+  test("3 lances aceitos, em ordem", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.map(b => b.seq)).to.eql([1, 2, 3]);
+    expect(res.body.map(b => b.amount)).to.eql(["100.00", "105.00", "120.00"]);
+  });
+}
+
+docs {
+  `afterSeq` permite ao cliente buscar só o que perdeu (por exemplo, depois de reconectar o WebSocket).
+}

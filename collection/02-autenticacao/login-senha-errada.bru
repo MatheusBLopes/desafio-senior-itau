@@ -1,0 +1,29 @@
+meta {
+  name: Login com senha errada (401)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/auth/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{anaUser}}",
+    "password": "senha-errada-1"
+  }
+}
+
+tests {
+  test("recusado com mensagem genérica", () => {
+    expect(res.status).to.equal(401);
+    expect(res.body.message).to.equal("usuário ou senha inválidos");
+  });
+}
+
+docs {
+  A mesma resposta de "Login de usuário inexistente": quem tenta não descobre quais nomes existem.
+}

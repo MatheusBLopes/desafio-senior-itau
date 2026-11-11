@@ -1,0 +1,33 @@
+meta {
+  name: Bia cobre (105.00)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenBia}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "105.00"
+  }
+}
+
+tests {
+  test("Bia passa a liderar", () => {
+    expect(res.status).to.equal(201);
+    expect(res.body.seq).to.equal(2);
+    expect(res.body.currentPrice).to.equal("105.00");
+  });
+}

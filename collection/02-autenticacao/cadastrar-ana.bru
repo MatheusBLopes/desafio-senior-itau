@@ -1,0 +1,39 @@
+meta {
+  name: Cadastrar Ana
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/auth/signup
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{anaUser}}",
+    "password": "{{senha}}"
+  }
+}
+
+script:pre-request {
+  // Sufixo novo a cada execução: usuários novos, sem colidir com os de rodadas anteriores.
+  const sufixo = Date.now().toString(36);
+  bru.setVar("sufixo", sufixo);
+  bru.setVar("anaUser", `ana-${sufixo}`);
+  bru.setVar("biaUser", `bia-${sufixo}`);
+  bru.setVar("senha", `senha-${sufixo}-1`);
+}
+
+tests {
+  test("usuário criado já confirmado (sem e-mail)", () => {
+    expect(res.status).to.equal(201);
+    expect(res.body.username).to.equal(bru.getVar("anaUser"));
+  });
+}
+
+docs {
+  Cria o usuário no Cognito e o confirma na hora (AdminConfirmSignUp), sem e-mail nem SMS.
+  Senha: mínimo 8 caracteres, com letras minúsculas e números.
+}

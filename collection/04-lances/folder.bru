@@ -1,0 +1,14 @@
+meta {
+  name: 4. Lances
+  seq: 4
+}
+
+script:pre-request {
+  // Idempotency-Key nova para cada lance; os de retry fixam a sua no próprio request.
+  bru.setVar("chave", `k-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+}
+
+docs {
+  Disputa entre Ana e Bia. Com o WebSocket da pasta 5 conectado, cada lance aceito aparece lá como
+  `AUCTION_SNAPSHOT` com o novo preço e o novo líder.
+}

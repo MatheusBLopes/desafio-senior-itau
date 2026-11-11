@@ -1,0 +1,25 @@
+meta {
+  name: Cadastro duplicado (409)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/auth/signup
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{anaUser}}",
+    "password": "{{senha}}"
+  }
+}
+
+tests {
+  test("nome já usado", () => {
+    expect(res.status).to.equal(409);
+    expect(res.body.code).to.equal("USERNAME_TAKEN");
+  });
+}

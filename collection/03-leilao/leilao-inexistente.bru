@@ -1,0 +1,17 @@
+meta {
+  name: Leilão inexistente (404)
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/auctions/00000000-0000-0000-0000-000000000000
+  body: none
+  auth: none
+}
+
+tests {
+  test("404", () => {
+    expect(res.status).to.equal(404);
+  });
+}

@@ -1,0 +1,28 @@
+meta {
+  name: Lance sem token, só com X-User-Id (401)
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: none
+}
+
+headers {
+  X-User-Id: {{anaUser}}
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "999.00"
+  }
+}
+
+tests {
+  test("X-User-Id não identifica ninguém na AWS", () => {
+    expect(res.status).to.equal(401);
+  });
+}

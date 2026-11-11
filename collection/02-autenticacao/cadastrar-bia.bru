@@ -1,0 +1,24 @@
+meta {
+  name: Cadastrar Bia
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/auth/signup
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{biaUser}}",
+    "password": "{{senha}}"
+  }
+}
+
+tests {
+  test("segunda participante criada", () => {
+    expect(res.status).to.equal(201);
+  });
+}

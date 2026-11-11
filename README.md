@@ -45,11 +45,11 @@ Transcrição do enunciado recebido.
 | Requisito | Como é garantido | Onde |
 |---|---|---|
 | **Ordem determinística** | `HINCRBY seq` dentro do script: cada lance aceito recebe um número único e contíguo (1, 2, 3...). "Ordem de chegada" = ordem de serialização no Valkey (ver ADR-02). | `place_bid.lua` |
-| **Relógio confiável** | Prazo e anti-sniping usam só o `TIME` do Valkey, nunca o relógio do cliente ou da task. | `place_bid.lua`, `RedisClock` (`common.py`) |
+| **Relógio confiável** | Prazo e anti-sniping usam só o `TIME` do Valkey, nunca o relógio do cliente ou da task. | `place_bid.lua`, `RedisClock` (`storage/valkey.py`) |
 | **Sem lance inválido** | Na mesma execução atômica: leilão `OPEN`, dentro do prazo, valor ≥ preço inicial (1º lance) ou ≥ preço atual + incremento. No empate, vence quem chegou primeiro. | `place_bid.lua` |
-| **Sem duplicado** | `Idempotency-Key` obrigatório, memorizado por (leilão, usuário, key) com o resultado original, inclusive rejeições. Mesma key com outro valor: `422` (exceto se o original foi rejeitado no pré-filtro por já estar superado, ver ADR-03). A key de um lance aceito vive até o fim do leilão + 24 h. No Postgres, `PK (auction_id, seq)` e `UNIQUE (auction_id, user_id, idempotency_key)`; uma reentrega é ignorada e uma colisão real vai para `bid_conflicts`, com alarme. | `place_bid.lua`, `BidPersister` (`persistence.py`), `migrations/V1`/`V2__*.sql` |
-| **Tempo real** | O Lua publica no Pub/Sub; cada task envia snapshots por WebSocket aos seus clientes, consolidados a cada 150 ms (conflation). Prorrogação e encerramento saem na hora. | `realtime.py` |
-| **Alta concorrência** | O caminho do lance é 1 script Lua no Valkey (mais o rate limit); o Postgres fica fora dele (write-behind via Redis Streams). Um pré-filtro na task resolve 97% dos lances (os já superados) sem chamar o Lua. Acima da capacidade, a task devolve o excesso como 503 em vez de enfileirar (load shedding). | `bids.py`, `persistence.py`, `LoadShedder` (`app.py`) |
+| **Sem duplicado** | `Idempotency-Key` obrigatório, memorizado por (leilão, usuário, key) com o resultado original, inclusive rejeições. Mesma key com outro valor: `422` (exceto se o original foi rejeitado no pré-filtro por já estar superado, ver ADR-03). A key de um lance aceito vive até o fim do leilão + 24 h. No Postgres, `PK (auction_id, seq)` e `UNIQUE (auction_id, user_id, idempotency_key)`; uma reentrega é ignorada e uma colisão real vai para `bid_conflicts`, com alarme. | `place_bid.lua`, `BidPersister` (`persistence/persister.py`), `storage/migrations/V1`/`V2__*.sql` |
+| **Tempo real** | O Lua publica no Pub/Sub; cada task envia snapshots por WebSocket aos seus clientes, consolidados a cada 150 ms (conflation). Prorrogação e encerramento saem na hora. | `realtime/` (`listener.py`, `broadcaster.py`) |
+| **Alta concorrência** | O caminho do lance é 1 script Lua no Valkey (mais o rate limit); o Postgres fica fora dele (write-behind via Redis Streams). Um pré-filtro na task resolve 97% dos lances (os já superados) sem chamar o Lua. Acima da capacidade, a task devolve o excesso como 503 em vez de enfileirar (load shedding). | `bidding/service.py`, `persistence/stream_consumer.py`, `LoadShedder` (`api/middleware.py`) |
 
 **Além do enunciado:**
 - **Anti-sniping:** um lance nos últimos X segundos estende o leilão em Y segundos, configurável por leilão.
@@ -146,6 +146,8 @@ uv run --project ../../../../bid-service python ../../../../scripts/ws-check.py 
 ```
 
 Pausado, o custo cai para **~US$ 1,1/dia**: o ALB e seus IPv4 e o nó do ElastiCache não têm pausa na AWS, e o disco do RDS continua cobrado. O RDS parado volta sozinho depois de 7 dias (regra da AWS). Custo zero só com `terraform destroy` (o ECR vai junto, com `force_delete`).
+
+**Testar no Bruno:** abra a pasta `bruno/` no [Bruno](https://www.usebruno.com/) (*Open Collection*) e escolha o ambiente `aws`. A collection percorre o sistema inteiro: saúde, cadastro e login no Cognito, criação do leilão, a disputa com as regras (idempotência, empate, incremento, token ausente ou adulterado), o WebSocket com os eventos ao vivo e o encerramento com o vencedor. Cada requisição tem testes e uma explicação na aba *Docs*. *Run* na collection leva ~70 s, porque espera o leilão de 60 s acabar. O WebSocket é interativo: conecte-o depois de criar o leilão e rode os lances com ele aberto.
 
 ## 5. API
 
@@ -350,16 +352,24 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 
 ```
 ├── bid-service/                  Python 3.13 (FastAPI + asyncio), gerenciado com uv
-│   ├── src/auction/              app (rotas, middlewares), bids, auctions, realtime, persistence,
-│   │                             scheduler, observability, common, config, db
-│   ├── src/auction/lua/          place_bid, close_auction, hydrate_auction, rate_limit
-│   ├── src/auction/migrations/   V1, V2 (SQL versionado, aplicado no startup)
+│   ├── src/auction/              app.py (monta a app), container.py (dependências), config.py, __main__.py
+│   │   ├── api/                  rotas HTTP e WebSocket, middlewares, handlers de erro
+│   │   ├── auth/                 JWT do Cognito, cadastro e login
+│   │   ├── bidding/              o lance: pré-filtro, place_bid.lua, rate limit, histórico
+│   │   ├── lifecycle/            cadastro, carga no Valkey, encerramento e reconciliação
+│   │   ├── realtime/             cache local, Pub/Sub e entrega por WebSocket
+│   │   ├── persistence/          write-behind: stream → Postgres
+│   │   ├── storage/              clientes do Valkey e do Postgres, chaves, scripts Lua e migrations
+│   │   │   ├── lua/              place_bid, close_auction, hydrate_auction, rate_limit
+│   │   │   └── migrations/       V1, V2 (SQL versionado, aplicado no startup)
+│   │   ├── observability/        logs JSON, métricas (Prometheus e EMF), tracing
+│   │   └── core/                 erros da API, dinheiro, tempo
 │   ├── tests/                    pytest + Testcontainers
 │   └── Dockerfile                multi-stage, multi-arquitetura (ARM64), OpenTelemetry embutido
-├── bid-service-java/             versão original em Java 21 + Spring Boot, mantida como referência
 ├── docker-compose.yml            réplicas da app + nginx + Valkey + Postgres (+ Prometheus/Grafana)
 ├── infra/local/                  nginx, Prometheus, Grafana
 ├── infra/terraform/              bootstrap + módulos (network, alb, ecs, elasticache, rds, ecr, observability, budget) + envs/dev
+├── bruno/                        collection do Bruno: o fluxo completo contra a AWS, com testes
 ├── load-test/                    k6/bid-storm.js, capacity.sh e results/
 ├── scripts/                      smoke-test.sh, build-push.sh
 └── docs/                         arquitetura, ADRs, FinOps

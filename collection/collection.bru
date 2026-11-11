@@ -1,0 +1,38 @@
+script:pre-request {
+  // Usuários descartáveis do teste. "Cadastrar Ana" gera um sufixo novo a cada execução;
+  // isto só cobre quem abre a collection por outra requisição.
+  if (!bru.getVar("sufixo")) {
+    bru.setVar("sufixo", Date.now().toString(36));
+  }
+  const sufixo = bru.getVar("sufixo");
+  bru.setVar("anaUser", `ana-${sufixo}`);
+  bru.setVar("biaUser", `bia-${sufixo}`);
+  bru.setVar("senha", `senha-${sufixo}-1`);
+}
+
+docs {
+  # Leilão em tempo real
+
+  Percorre o sistema inteiro na AWS: cadastro e login no Cognito, criação do leilão, disputa de lances
+  com as regras de negócio, eventos ao vivo pelo WebSocket e o encerramento com o vencedor.
+
+  ## Como usar
+
+  1. Selecione o ambiente **aws** (canto superior direito).
+  2. **Tudo de uma vez:** clique com o botão direito na collection → *Run*. Leva ~70 s, porque a
+     última pasta espera o leilão acabar (`duracaoLeilao`, 60 s por padrão).
+  3. **Passo a passo, vendo o tempo real:** rode as pastas 1 a 3, abra o WebSocket da pasta 5
+     (*Connect*) e deixe a aba aberta; depois rode os lances da pasta 4 e veja os eventos chegando.
+     Por fim, rode a pasta 6.
+
+  Cada execução de "Cadastrar Ana" cria usuários novos (`ana-<sufixo>` e `bia-<sufixo>`), então
+  a collection pode ser rodada quantas vezes quiser.
+
+  ## O que observar
+
+  - Lances usam o access token do Cognito (`Authorization: Bearer`); o header `X-User-Id` é ignorado.
+  - `Idempotency-Key` repetida com o mesmo valor devolve o lance original (200,
+    `Idempotent-Replayed: true`); com outro valor, 422.
+  - Valores em dinheiro saem como string ("105.00"), nunca como float.
+  - Limites: 10 lances/s por usuário e 50 req/s por IP (429 acima disso).
+}

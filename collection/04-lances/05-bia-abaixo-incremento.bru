@@ -1,0 +1,31 @@
+meta {
+  name: Bia abaixo do incremento (409)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenBia}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": 104.99
+  }
+}
+
+tests {
+  test("precisa de pelo menos 5.00 a mais", () => {
+    expect(res.status).to.equal(409);
+  });
+}

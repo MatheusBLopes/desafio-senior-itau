@@ -1,0 +1,40 @@
+meta {
+  name: Eventos do leilão
+  type: ws
+  seq: 1
+}
+
+ws {
+  url: {{wsUrl}}/ws/auctions/{{auctionId}}
+  body: ws
+  auth: none
+}
+
+body:ws {
+  name: mensagem do cliente (o servidor fecha com 1008)
+  type: json
+  content: '''
+    {"amount": "999.00"}
+  '''
+}
+
+settings {
+  timeout: 0
+  keepAliveInterval: 0
+}
+
+docs {
+  Clique em **Connect** depois de criar o leilão (pasta 3) e deixe a aba aberta.
+
+  - Ao conectar, chega um `AUCTION_SNAPSHOT` com o estado atual.
+  - A cada lance aceito, um novo `AUCTION_SNAPSHOT` com preço, líder e `minimumNextBid`
+    (no máximo um a cada 150 ms por leilão, agrupando rajadas).
+  - Lance nos últimos 10 s: `AUCTION_EXTENDED` com o novo `endsAt`.
+  - No fim: `AUCTION_CLOSED` com `winnerId` e `finalPrice`.
+
+  O canal é só de leitura: lances vão pelo POST. Enviar a mensagem deste request faz o servidor
+  fechar a conexão com o código 1008, de propósito.
+
+  Funciona com qualquer número de tasks: o lance aceito em uma task chega às conexões abertas em
+  todas elas pelo Pub/Sub do Valkey.
+}

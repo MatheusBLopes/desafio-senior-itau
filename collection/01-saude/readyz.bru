@@ -1,0 +1,23 @@
+meta {
+  name: Readiness (health check do ALB)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/readyz
+  body: none
+  auth: none
+}
+
+tests {
+  test("API no ar e Valkey acessível", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.status).to.equal("UP");
+  });
+}
+
+docs {
+  O ALB usa esta rota para decidir se a task recebe tráfego. Só confere o Valkey, de propósito:
+  com o Postgres fora, os lances continuam funcionando (write-behind), então as tasks seguem saudáveis.
+}

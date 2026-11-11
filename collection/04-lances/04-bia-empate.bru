@@ -1,0 +1,33 @@
+meta {
+  name: Bia empata (409)
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenBia}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "100.00"
+  }
+}
+
+tests {
+  test("empate não vale", () => {
+    expect(res.status).to.equal(409);
+    expect(res.body.outcome).to.equal("REJECTED");
+    expect(res.body.minimumNextBid).to.equal("105.00");
+  });
+}

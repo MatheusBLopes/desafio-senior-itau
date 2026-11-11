@@ -1,0 +1,59 @@
+meta {
+  name: Lance com token adulterado (401)
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAdulterado}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "999.00"
+  }
+}
+
+script:pre-request {
+  // Troca o username no payload do token da Bia pelo da Ana, mantendo a assinatura original.
+  // Base64url à mão: o modo seguro do Bruno não tem Buffer nem atob.
+  const ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const decode = s => {
+    let bits = "", out = "";
+    for (const ch of s) bits += ABC.indexOf(ch).toString(2).padStart(6, "0");
+    for (let i = 0; i + 8 <= bits.length; i += 8) out += String.fromCharCode(parseInt(bits.slice(i, i + 8), 2));
+    return JSON.parse(decodeURIComponent(escape(out)));
+  };
+  const encode = o => {
+    const raw = unescape(encodeURIComponent(JSON.stringify(o)));
+    let bits = "", out = "";
+    for (const ch of raw) bits += ch.charCodeAt(0).toString(2).padStart(8, "0");
+    for (let i = 0; i < bits.length; i += 6) out += ABC[parseInt(bits.slice(i, i + 6).padEnd(6, "0"), 2)];
+    return out;
+  };
+  const [header, payload, signature] = bru.getVar("tokenBia").split(".");
+  const claims = decode(payload);
+  claims.username = bru.getVar("anaUser");
+  bru.setVar("tokenAdulterado", `${header}.${encode(claims)}.${signature}`);
+}
+
+tests {
+  test("assinatura não confere", () => {
+    expect(res.status).to.equal(401);
+  });
+}
+
+docs {
+  A Bia tenta se passar pela Ana editando o próprio token. A API valida a assinatura RS256 com as
+  chaves públicas do Cognito (JWKS) e recusa.
+}

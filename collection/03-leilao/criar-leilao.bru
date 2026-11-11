@@ -1,0 +1,49 @@
+meta {
+  name: Criar leilão
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/auctions
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAna}}
+}
+
+body:json {
+  {
+    "title": "Guitarra Fender 1965",
+    "startingPrice": "100.00",
+    "minIncrement": "5.00",
+    "durationSeconds": {{duracaoLeilao}},
+    "antiSnipingWindowSeconds": 10,
+    "antiSnipingExtendSeconds": 10
+  }
+}
+
+script:post-response {
+  if (res.status === 201) {
+    bru.setVar("auctionId", res.body.id);
+    bru.setVar("endsAt", res.body.endsAt);
+  }
+}
+
+tests {
+  test("leilão aberto, sem lances", () => {
+    expect(res.status).to.equal(201);
+    expect(res.getHeader("location")).to.equal(`/auctions/${res.body.id}`);
+    expect(res.body.status).to.equal("OPEN");
+    expect(res.body.acceptingBids).to.equal(true);
+    expect(res.body.seq).to.equal(0);
+    expect(res.body.minimumNextBid).to.equal("100.00");
+  });
+}
+
+docs {
+  O id fica em `auctionId`. Anti-sniping: um lance nos últimos 10 s empurra o fim em 10 s.
+  A duração vem da variável de ambiente `duracaoLeilao`.
+}

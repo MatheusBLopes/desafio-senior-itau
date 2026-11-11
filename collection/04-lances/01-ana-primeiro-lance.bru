@@ -1,0 +1,41 @@
+meta {
+  name: Ana dá o primeiro lance (100.00)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAna}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "100.00"
+  }
+}
+
+script:post-response {
+  // Guarda a key para o retry.
+  bru.setVar("chaveAna", bru.getVar("chave"));
+}
+
+tests {
+  test("aceito com seq 1", () => {
+    expect(res.status).to.equal(201);
+    expect(res.body.outcome).to.equal("ACCEPTED");
+    expect(res.body.seq).to.equal(1);
+    expect(res.body.currentPrice).to.equal("100.00");
+    expect(res.body.minimumNextBid).to.equal("105.00");
+    expect(res.getHeader("idempotent-replayed")).to.equal("false");
+  });
+}

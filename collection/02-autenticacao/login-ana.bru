@@ -1,0 +1,38 @@
+meta {
+  name: Login Ana
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/auth/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "username": "{{anaUser}}",
+    "password": "{{senha}}"
+  }
+}
+
+script:post-response {
+  if (res.status === 200) {
+    bru.setVar("tokenAna", res.body.accessToken);
+  }
+}
+
+tests {
+  test("devolve um access token JWT do Cognito", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.tokenType).to.equal("Bearer");
+    expect(res.body.accessToken.split(".")).to.have.lengthOf(3);
+    expect(res.body.expiresIn).to.equal(3600);
+  });
+}
+
+docs {
+  O token fica na variável `tokenAna`. Cole em https://jwt.io para ver as claims:
+  `token_use: access`, `client_id`, `username`, `exp` (1 h).
+}

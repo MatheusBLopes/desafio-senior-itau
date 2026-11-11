@@ -1,0 +1,31 @@
+meta {
+  name: Criar leilão inválido (400)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/auctions
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAna}}
+}
+
+body:json {
+  {
+    "title": "Duração curta demais",
+    "startingPrice": "100.00",
+    "minIncrement": "5.00",
+    "durationSeconds": 1
+  }
+}
+
+tests {
+  test("duração mínima de 5 s", () => {
+    expect(res.status).to.equal(400);
+    expect(res.body.message).to.contain("durationSeconds");
+  });
+}

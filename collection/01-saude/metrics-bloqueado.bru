@@ -1,0 +1,21 @@
+meta {
+  name: Métricas fora do acesso público
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/metrics
+  body: none
+  auth: none
+}
+
+tests {
+  test("/metrics não é exposto pelo ALB", () => {
+    expect(res.status).to.equal(404);
+  });
+}
+
+docs {
+  `/metrics` e `/health` só respondem na porta interna 8081. Pelo ALB (porta 8080), 404.
+}

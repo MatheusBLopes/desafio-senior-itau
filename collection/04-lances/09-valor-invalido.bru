@@ -1,0 +1,31 @@
+meta {
+  name: Valor inválido (400)
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/auctions/{{auctionId}}/bids
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{tokenAna}}
+}
+
+headers {
+  Idempotency-Key: {{chave}}
+}
+
+body:json {
+  {
+    "amount": "abc"
+  }
+}
+
+tests {
+  test("amount precisa ser um número", () => {
+    expect(res.status).to.equal(400);
+  });
+}
