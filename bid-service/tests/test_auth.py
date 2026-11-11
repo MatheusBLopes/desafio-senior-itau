@@ -219,3 +219,25 @@ async def test_bids_and_auction_creation_require_a_valid_token(server, http, cog
 async def test_signup_and_login_do_not_exist_in_header_mode(http):
     response = await http.post("/auth/login", json={"username": "ana", "password": "12345678"})
     assert response.status_code == 404
+
+
+async def test_cognito_outage_does_not_cause_a_jwks_fetch_per_request(signer):
+    class Down:
+        fetches = 0
+
+        async def fetch(self) -> dict:
+            self.fetches += 1
+            raise OSError("cognito fora do ar")
+
+    down = Down()
+    verifier = JwtVerifier(ISSUER, CLIENT_ID, down)
+    for _ in range(5):
+        with pytest.raises(ApiError) as e:
+            await verifier.user_of(signer.token("ana"))
+        assert e.value.status == 503
+    assert down.fetches == 1  # as outras quatro não esperaram o timeout de uma busca cada
+
+    verifier._last_refresh -= JwtVerifier.FAILURE_BACKOFF_S  # passou o intervalo entre tentativas
+    with pytest.raises(ApiError):
+        await verifier.user_of(signer.token("ana"))
+    assert down.fetches == 2

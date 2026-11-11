@@ -227,3 +227,38 @@ async def test_websocket_clients_cannot_publish_nor_subscribe_outside_an_auction
         await bid(http, aid, "ana", key(), "100.00")
         event = await next_event(victim, "AUCTION_SNAPSHOT", 1)
         assert event.get("winnerId") != "atacante"
+
+
+async def test_websocket_gets_the_current_state_from_a_task_that_never_saw_the_auction(server, http):
+    c = server.c
+    aid = await create_auction(http, 60)
+    await bid(http, aid, "ana", key(), "100.00")
+    await eventually(lambda: (s := c.cache.get(uuid.UUID(aid))) is not None and s.seq == 1, 5)
+    await asyncio.sleep(0.3)  # o snapshot desse lance já foi distribuído
+    # Como numa task que subiu depois do lance (deploy, scale-out): o cache local não conhece o leilão.
+    c.cache.evict(uuid.UUID(aid))
+
+    async with await ws_events(server, aid) as ws:
+        snapshot = await next_event(ws, "AUCTION_SNAPSHOT", 1, timeout=3)
+        assert snapshot["currentPrice"] == "100.00" and snapshot["leaderId"] == "ana"
+
+
+async def test_events_lost_while_pub_sub_was_down_reach_the_clients_after_it_reconnects(server, http):
+    c = server.c
+    aid = await create_auction(http, 60)
+    stale = await create_auction(http, 60)
+    await bid(http, stale, "ana", key(), "500.00")
+    await eventually(lambda: c.cache.get(uuid.UUID(stale)) is not None, 5)
+
+    async with await ws_events(server, aid) as ws:
+        await asyncio.sleep(0.3)
+        # O estado muda no Valkey sem que a task receba o evento, e a conexão do Pub/Sub cai.
+        await c.redis.hset(keys.auction_key(aid), mapping={"seq": "7", "currentPrice": "17000", "leaderId": "zeca"})
+        await c.redis.client_kill_filter(_type="pubsub")
+
+        snapshot = await next_event(ws, "AUCTION_SNAPSHOT", 7, timeout=10)
+        assert snapshot["currentPrice"] == "170.00" and snapshot["leaderId"] == "zeca"
+
+    # O que a task sabia dos outros leilões é descartado: um preço velho e MAIOR que o real (failover
+    # para uma réplica atrasada) faria o pré-filtro rejeitar lances válidos.
+    assert c.cache.get(uuid.UUID(stale)) is None

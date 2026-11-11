@@ -1,7 +1,9 @@
 """Montagem das dependências da task e ciclo de vida das tarefas de fundo."""
 
 import asyncio
-from collections.abc import Callable
+import logging
+import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +19,8 @@ from .lifecycle.repository import AuctionRepository
 from .lifecycle.scheduler import AuctionCloser, AuctionReconciler
 from .lifecycle.service import AuctionService
 from .lifecycle.state_loader import AuctionStateLoader
+from .observability.cloudwatch_emf import CloudWatchEmfSink
+from .observability.logs import fields
 from .observability.metrics import Metrics, export_emf
 from .observability.tracing import untraced
 from .persistence.persister import BidPersister
@@ -27,6 +31,8 @@ from .realtime.listener import AuctionEventListener
 from .storage import postgres
 from .storage.scripts import LuaScripts
 from .storage.valkey import RedisClock, create_pubsub_redis, create_redis
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,12 +71,13 @@ async def build(settings: Settings) -> Container:
     scripts = LuaScripts.register(redis, settings)
     metrics = Metrics()
     cache = LiveAuctionCache()
-    broadcaster = SnapshotBroadcaster(cache)
+    broadcaster = SnapshotBroadcaster(cache, redis)
     auction_repo = AuctionRepository(pool)
     loader = AuctionStateLoader(auction_repo, pool, redis, scripts, settings)
     consumer = BidStreamConsumer(redis, BidPersister(pool), auction_repo, loader, metrics, settings)
     pubsub_redis = create_pubsub_redis(settings)
-    listener = AuctionEventListener(pubsub_redis, settings.events_channel, cache, broadcaster, consumer.notify)
+    listener = AuctionEventListener(pubsub_redis, settings.events_channel, cache, broadcaster, consumer.notify,
+                                    state_redis=redis)
     return Container(
         settings=settings, redis=redis, pubsub_redis=pubsub_redis, pool=pool, clock=clock, scripts=scripts,
         metrics=metrics, cache=cache, broadcaster=broadcaster, listener=listener,
@@ -93,6 +100,27 @@ async def _every(seconds: float, action: Callable[[], None]) -> None:
         action()
 
 
+async def _supervised(name: str, run: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """Mantém uma tarefa de fundo viva: se ela terminar com erro, registra e a inicia de novo em 1 s.
+
+    Sem isso, uma exceção não prevista encerra a tarefa em silêncio e a task continua "saudável" sem
+    encerrar leilões ou sem enviar snapshots. O consumer do stream tem o próprio laço de retry.
+    """
+    while True:
+        try:
+            await run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("tarefa de fundo falhou; reiniciando em 1 s", extra=fields(task=name))
+        await asyncio.sleep(1)
+
+
+def _spawn(name: str, run: Callable[[], Coroutine[Any, Any, None]]) -> asyncio.Task[None]:
+    """Cria a tarefa de fundo supervisionada, com nome."""
+    return asyncio.create_task(_supervised(name, run), name=name)
+
+
 def start_background(container: Container) -> None:
     """Inicia as tarefas de fundo fora do tracing (ver untraced)."""
     with untraced():
@@ -100,18 +128,27 @@ def start_background(container: Container) -> None:
 
 
 def _start_background(container: Container) -> None:
-    """Listener do Pub/Sub, snapshots, encerramento, reconciliação, limpeza do limite por IP, EMF e consumer."""
+    """Listener do Pub/Sub, snapshots, encerramento, reconciliação, limpezas periódicas, EMF e consumer."""
     settings = container.settings
+
+    def evict_closed() -> None:
+        """Tira do cache local os leilões encerrados há mais que a retenção e sem ninguém assistindo."""
+        container.cache.evict_closed(int(time.time() * 1000) - settings.closed_retention_s * 1000,
+                                     keep=container.broadcaster.watched())
+
     container.tasks += [
-        asyncio.create_task(container.listener.run(), name="auction-events"),
-        asyncio.create_task(container.broadcaster.run(settings.snapshot_interval_s), name="snapshots"),
-        asyncio.create_task(container.closer.run(), name="closer"),
-        asyncio.create_task(container.reconciler.run(), name="reconciler"),
-        asyncio.create_task(_every(60, container.ip_limiter.evict_idle), name="ip-limiter-evict"),
+        _spawn("auction-events", container.listener.run),
+        _spawn("snapshots", lambda: container.broadcaster.run(settings.snapshot_interval_s)),
+        _spawn("closer", container.closer.run),
+        _spawn("reconciler", container.reconciler.run),
+        _spawn("ip-limiter-evict", lambda: _every(60, container.ip_limiter.evict_idle)),
+        _spawn("cache-evict", lambda: _every(60, evict_closed)),
     ]
     if settings.cloudwatch_emf:
-        container.tasks.append(asyncio.create_task(
-            export_emf(container.metrics, settings.metrics_namespace, settings.metrics_step_s)))
+        sink = (CloudWatchEmfSink(settings.cloudwatch_emf_log_group, settings.cognito_region)
+                if settings.cloudwatch_emf_log_group else None)
+        container.tasks.append(_spawn("emf-export", lambda: export_emf(
+            container.metrics, settings.metrics_namespace, settings.metrics_step_s, sink)))
     container.consumer.start()
 
 

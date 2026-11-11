@@ -24,9 +24,16 @@ resource "aws_cloudwatch_log_group" "app" {
 }
 
 # Logs do sidecar ADOT (startup e telemetria do próprio coletor) num grupo separado e de retenção curta:
-# o grupo da aplicação fica só com os logs do bid-service e as métricas EMF.
+# o grupo da aplicação fica só com os logs do bid-service.
 resource "aws_cloudwatch_log_group" "adot" {
   name              = "/ecs/${var.name}/adot"
+  retention_in_days = 1
+}
+
+# Métricas de negócio (EMF): a aplicação grava aqui por PutLogEvents, fora do grupo dos logs. O CloudWatch
+# extrai as métricas na ingestão; as linhas em si não servem depois, então a retenção é mínima.
+resource "aws_cloudwatch_log_group" "metrics" {
+  name              = "/ecs/${var.name}/metrics"
   retention_in_days = 1
 }
 
@@ -34,7 +41,7 @@ resource "aws_cloudwatch_log_group" "adot" {
 # No console: CloudWatch → Logs Insights → Consultas salvas → pasta com o nome do ambiente.
 locals {
   log_queries = {
-    "1 - Logs da aplicação (sem métricas)"                = <<-EOT
+    "1 - Logs da aplicação"                               = <<-EOT
       fields @timestamp, level, message, requestId, userId, auctionId
       | filter ispresent(level)
       | sort @timestamp desc
@@ -125,21 +132,21 @@ resource "aws_iam_role" "task" {
 }
 
 resource "aws_iam_role_policy" "task" {
-  name = "metrics-and-traces"
+  name = "traces-metrics-and-signup"
   role = aws_iam_role.task.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect    = "Allow"
-        Action    = ["cloudwatch:PutMetricData"]
-        Resource  = "*"
-        Condition = { StringEquals = { "cloudwatch:namespace" = "Auction" } }
-      },
-      {
         Effect   = "Allow"
         Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
         Resource = "*"
+      },
+      {
+        # Métricas EMF: só criar o stream da task e gravar, só no grupo de métricas.
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.metrics.arn}:*"
       },
       {
         # Confirmar o cadastro na hora, sem e-mail. Só essa ação administrativa, só neste user pool.
@@ -165,9 +172,10 @@ locals {
     AUTH_MODE            = "cognito"
     COGNITO_USER_POOL_ID = var.cognito_user_pool_id
     COGNITO_CLIENT_ID    = var.cognito_client_id
-    # Métricas de negócio (namespace Auction) via Embedded Metric Format: linhas JSON no stdout que o
-    # CloudWatch Logs transforma em métricas, sem chamadas PutMetricData.
-    CLOUDWATCH_EMF = "true"
+    # Métricas de negócio (namespace Auction) via Embedded Metric Format: linhas JSON que o CloudWatch Logs
+    # transforma em métricas, sem PutMetricData. Vão para o grupo /metrics, não para o dos logs.
+    CLOUDWATCH_EMF           = "true"
+    CLOUDWATCH_EMF_LOG_GROUP = aws_cloudwatch_log_group.metrics.name
     # Traces: auto-instrumentação OpenTelemetry → sidecar ADOT → X-Ray, amostrando 5% (FinOps).
     OTEL_ENABLED                = "true"
     OTEL_SERVICE_NAME           = "bid-service"

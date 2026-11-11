@@ -32,7 +32,7 @@ x-app: &app
     nofile: 65535
   # Memória da task do Fargate (1 GB). Um processo Python usa no máximo um núcleo.
   mem_limit: 1g
-  # Medição de capacidade (load-test/capacity.sh): APP_CPUS=0.5 imita a task de 0,5 vCPU do Fargate, e
+  # Medição de capacidade: APP_CPUS=0.5 imita a task de 0,5 vCPU do Fargate, e
   # SYSTEM_CPUSET prende o sistema a núcleos que o k6 não usa. Vazios = sem limite (uso normal).
   cpus: ${APP_CPUS:-0}
   cpuset: ${SYSTEM_CPUSET:-}

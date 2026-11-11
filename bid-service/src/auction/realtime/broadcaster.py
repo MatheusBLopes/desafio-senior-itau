@@ -12,13 +12,14 @@ from typing import Any
 
 import orjson
 from fastapi import WebSocket, WebSocketDisconnect
+from redis.asyncio import Redis
 
 from ..core.money import from_cents
 from ..core.serialization import without_nulls
 from ..core.time import iso
 from ..observability.logs import bind, fields
 from ..observability.metrics import WEBSOCKET_SESSIONS
-from .cache import LiveAuctionCache, Snapshot
+from .cache import LiveAuctionCache, Snapshot, read_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -69,11 +70,34 @@ class SnapshotBroadcaster:
     AUCTION_EXTENDED e AUCTION_CLOSED saem na hora.
     """
 
-    def __init__(self, cache: LiveAuctionCache):
-        """Começa sem clientes e sem leilões marcados."""
+    def __init__(self, cache: LiveAuctionCache, redis: Redis | None = None):
+        """Começa sem clientes e sem leilões marcados. Com `redis`, o snapshot inicial não depende do cache."""
         self._cache = cache
+        self._redis = redis
         self._dirty: set[uuid.UUID] = set()
         self._subscribers: dict[uuid.UUID, set[_Subscriber]] = {}
+
+    def watched(self) -> set[uuid.UUID]:
+        """Leilões com pelo menos um cliente conectado nesta task."""
+        return set(self._subscribers)
+
+    async def _current(self, auction_id: uuid.UUID) -> Snapshot | None:
+        """Estado para o snapshot inicial: o do cache ou, se a task ainda não viu o leilão, o do Valkey.
+
+        O cache só conhece o que passou pelo Pub/Sub desde que a task subiu. Numa task nova (deploy,
+        scale-out), um leilão sem lances recentes não está nele, e o cliente ficaria sem estado até o
+        próximo lance.
+        """
+        current = self._cache.get(auction_id)
+        if current is not None or self._redis is None:
+            return current
+        try:
+            loaded = await read_snapshot(self._redis, auction_id)
+        except Exception as e:
+            log.warning("falha ao ler o estado inicial do leilão para o WebSocket", extra=fields(error=e))
+            return None
+        # apply devolve o mais novo: um evento pode ter chegado ao cache durante a leitura.
+        return None if loaded is None else self._cache.apply(loaded, replace=False)
 
     def mark_dirty(self, auction_id: uuid.UUID) -> None:
         """Marca o leilão para receber um snapshot no próximo intervalo."""
@@ -127,11 +151,11 @@ class SnapshotBroadcaster:
         subscriber = _Subscriber(ws)
         self._subscribers.setdefault(parsed_id, set()).add(subscriber)
         WEBSOCKET_SESSIONS.inc()
-        current = self._cache.get(parsed_id)
-        if current is not None:
-            subscriber.queue.put_nowait(orjson.dumps(to_event(SNAPSHOT, current)).decode())
         writer = asyncio.create_task(self._write(subscriber))
         try:
+            current = await self._current(parsed_id)
+            if current is not None:
+                subscriber.queue.put_nowait(orjson.dumps(to_event(SNAPSHOT, current)).decode())
             # Clientes só escutam. Qualquer mensagem recebida (como um AUCTION_CLOSED forjado) fecha a conexão.
             message = await ws.receive()
             if message["type"] != "websocket.disconnect":

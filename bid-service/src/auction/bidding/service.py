@@ -61,7 +61,7 @@ class BidService:
         Essa rejeição não é memorizada: gravá-la custaria uma key no Valkey por lance superado (~450 B,
         centenas de MB num pico) e ~+25 ms de p95 a 10 mil lances/s. Só um lance avaliado pelo Lua trava
         a key. Um retry com o mesmo valor recebe a mesma rejeição (o preço só sobe), e a mesma key com
-        outro valor é avaliada como lance novo. Nunca há duplicata (ver ADR-03).
+        outro valor é avaliada como lance novo. Nunca há duplicata.
 
         Também aplica o rate limit por usuário. Quando o cache prevê rejeição (a maioria dos lances num
         pico), o rate limit e o EXISTS da key vão num só pipeline: uma ida ao Valkey em vez de duas.

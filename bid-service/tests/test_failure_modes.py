@@ -8,6 +8,7 @@ from dataclasses import replace
 from auction.bidding.rate_limit import UserRateLimiter
 from auction.bidding.service import BidService
 from auction.config import RateLimitConfig
+from auction.container import _supervised
 from auction.observability.metrics import PERSIST_CONFLICTS
 from auction.persistence.persister import BidPersister
 from auction.persistence.stream_consumer import BidStreamConsumer
@@ -152,3 +153,52 @@ async def test_consumer_persists_on_notification_and_sweeps_up_lost_notification
         listener._on_stream_event = c.consumer.notify
         await consumer.stop()
         c.consumer.start()
+
+
+async def test_reconciler_puts_back_an_open_auction_missing_from_the_closing_queue(server):
+    # Falha entre o hydrate (Lua) e o ZADD/SADD, que não são atômicos com ele: o hash existe, mas o closer
+    # e a varredura do consumer não sabem do leilão. Sem o reparo ele ficaria aberto para sempre.
+    c = server.c
+    aid = await new_auction(c, 5)
+    await c.bids.place(aid, "ana", key(), 10_000)
+    await c.redis.zrem(keys.ENDING, str(aid))
+    await c.redis.srem(keys.ACTIVE_STREAMS, str(aid))
+
+    await c.reconciler.reconcile()
+    assert await c.redis.zscore(keys.ENDING, str(aid)) is not None
+    assert await c.redis.sismember(keys.ACTIVE_STREAMS, str(aid))
+
+    async def closed() -> bool:
+        return await c.pool.fetchval("select status from auctions where id = $1", aid) == "CLOSED"
+
+    await eventually(closed, 15)
+
+
+async def test_reconciler_does_not_pull_back_a_deadline_extended_by_anti_sniping(server):
+    c = server.c
+    aid = await new_auction(c, 60)
+    extended = await c.redis.zscore(keys.ENDING, str(aid)) + 30_000
+    await c.redis.zadd(keys.ENDING, {str(aid): extended})
+
+    await c.reconciler.reconcile()
+    assert await c.redis.zscore(keys.ENDING, str(aid)) == extended
+
+
+async def test_a_background_task_that_crashes_is_logged_and_restarted():
+    runs = 0
+    recovered = asyncio.Event()
+
+    async def run() -> None:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            raise RuntimeError("falha não prevista")
+        recovered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_supervised("teste", run))
+    try:
+        await asyncio.wait_for(recovered.wait(), 5)
+    finally:
+        task.cancel()
+    assert runs == 2

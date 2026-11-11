@@ -109,7 +109,8 @@ class PortSeparation:
         if scope["type"] == "http" and scope["method"] in ("POST", "PUT", "PATCH"):
             headers = dict(scope["headers"])
             length = headers.get(b"content-length")
-            if length is None and b"chunked" in headers.get(b"transfer-encoding", b""):
+            # lower(): o valor do header não diferencia maiúsculas ("Chunked" também é chunked para o parser).
+            if length is None and b"chunked" in headers.get(b"transfer-encoding", b"").lower():
                 return await error_response(411, "LENGTH_REQUIRED", "envie Content-Length")(scope, receive, send)
             if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
                 return await error_response(413, "PAYLOAD_TOO_LARGE", "corpo grande demais")(scope, receive, send)
@@ -125,9 +126,10 @@ class LoadShedder:
 
     Conta requisições, não conexões: o ALB mantém conexões keep-alive ociosas que não custam nada.
     Probes (/livez, /readyz) e WebSocket ficam de fora: uma task cheia não deve sair do ALB por isso.
+    Métricas e health detalhado também: é na sobrecarga que mais se precisa deles.
     """
 
-    EXEMPT = {"/livez", "/readyz"}
+    EXEMPT = {"/livez", "/readyz"} | MANAGEMENT_PATHS
 
     def __init__(self, app: Any, max_in_flight: int):
         """Envolve a aplicação ASGI; max_in_flight vem de MAX_IN_FLIGHT (padrão 64)."""

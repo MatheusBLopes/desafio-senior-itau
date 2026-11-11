@@ -59,3 +59,15 @@ async def test_valkey_unavailable_returns_503_with_retry_after(server, http):
     finally:
         c.bids = original
         await dead.aclose()
+
+
+async def test_metrics_and_health_are_not_shed():
+    # É na sobrecarga que mais se precisa das métricas: a porta interna não entra no limite.
+    async def app(scope, receive, send):
+        await json_response({"ok": True})(scope, receive, send)
+
+    shedder = LoadShedder(app, max_in_flight=0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=shedder), base_url="http://t") as client:
+        assert (await client.get("/auctions/x")).status_code == 503
+        assert (await client.get("/metrics")).status_code == 200
+        assert (await client.get("/health")).status_code == 200

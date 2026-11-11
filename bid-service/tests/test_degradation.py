@@ -79,6 +79,18 @@ async def test_oversized_and_unbounded_bodies_are_refused(server, http):
                               headers={"Content-Type": "application/json", "X-User-Id": "ana", "Idempotency-Key": key()})
     assert chunked.status_code == 411
 
+    # O valor do header não diferencia maiúsculas: "Chunked" também não pode passar (socket cru, porque o
+    # httpx sempre escreve em minúsculas).
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    try:
+        writer.write((f"POST /auctions/{aid}/bids HTTP/1.1\r\nHost: t\r\nX-User-Id: ana\r\n"
+                      f"Idempotency-Key: {key()}\r\nTransfer-Encoding: Chunked\r\n\r\n"
+                      'f\r\n{"amount": 100}\r\n0\r\n\r\n').encode())
+        await writer.drain()
+        assert b" 411 " in await asyncio.wait_for(reader.readline(), 5)
+    finally:
+        writer.close()
+
 
 class FlakyPersister(BidPersister):
     """Falha na primeira gravação, como um Postgres que caiu e voltou."""

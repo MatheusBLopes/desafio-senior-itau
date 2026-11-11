@@ -197,10 +197,12 @@ class BidStreamConsumer:
                 total += pending + undelivered
                 if pending == 0 and undelivered == 0 and await self._auctions.is_closed(auction_id):
                     # Tudo persistido: o leilão sai do conjunto ativo e da memória após a retenção.
+                    # O SREM vai por último: se um EXPIRE falhar, o leilão continua no conjunto e a próxima
+                    # varredura repete. Na ordem inversa, as chaves ficariam para sempre (noeviction).
                     retention_s = self._settings.closed_retention_s
-                    await self._redis.srem(keys.ACTIVE_STREAMS, member)
                     await self._redis.expire(stream, retention_s)
                     await self._redis.expire(keys.auction_key(auction_id), retention_s)
+                    await self._redis.srem(keys.ACTIVE_STREAMS, member)
             except Exception as e:
                 log.debug("manutenção do stream falhou", extra=fields(stream=stream, error=e))
         STREAM_BACKLOG.set(total)

@@ -9,9 +9,13 @@ import random
 import sys
 import time
 from collections import Counter as Tally
+from typing import TYPE_CHECKING
 
 import orjson
 from prometheus_client import Counter, Gauge, Histogram
+
+if TYPE_CHECKING:
+    from .cloudwatch_emf import CloudWatchEmfSink
 
 LATENCY_BUCKETS = (.0005, .001, .002, .005, .01, .025, .05, .1, .25, .5, 1, 2.5)
 
@@ -128,10 +132,15 @@ class Metrics:
         return lines
 
 
-async def export_emf(metrics: Metrics, namespace: str, step_s: float) -> None:
-    """A cada intervalo, escreve as métricas no stdout; o driver awslogs do ECS leva ao CloudWatch."""
+async def export_emf(metrics: Metrics, namespace: str, step_s: float,
+                     sink: "CloudWatchEmfSink | None" = None) -> None:
+    """A cada intervalo, envia as métricas ao log group de métricas (sink) ou, sem ele, ao stdout."""
     while True:
         await asyncio.sleep(step_s)
-        for line in metrics.emf_lines(namespace):
+        lines = metrics.emf_lines(namespace)
+        if sink is not None:
+            await sink.send(lines)
+            continue
+        for line in lines:
             sys.stdout.buffer.write(line + b"\n")
         sys.stdout.flush()

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import orjson
 
+from auction.observability.cloudwatch_emf import CloudWatchEmfSink
 from auction.observability.metrics import Metrics
 
 TERRAFORM = Path(__file__).resolve().parents[2] / "infra/terraform/modules/observability/main.tf"
@@ -53,3 +54,51 @@ def test_emf_lines_match_the_metrics_used_by_alarms_and_dashboard():
     again = emitted_by_name(m.emf_lines("Auction"))
     assert again["auction.persist.conflicts.count"][0]["auction.persist.conflicts.count"] == 0
     assert again["auction.bids.count"][0]["auction.bids.count"] == 1
+
+
+class FakeLogsClient:
+    """Cliente de logs do boto3 de mentira: guarda as chamadas e pode falhar no put."""
+
+    class exceptions:
+        class ResourceAlreadyExistsException(Exception):
+            pass
+
+    def __init__(self, fail: bool = False):
+        self.streams: list[str] = []
+        self.puts: list[dict] = []
+        self.fail = fail
+
+    def create_log_stream(self, logGroupName, logStreamName):
+        if logStreamName in self.streams:
+            raise self.exceptions.ResourceAlreadyExistsException()
+        self.streams.append(logStreamName)
+
+    def put_log_events(self, **call):
+        if self.fail:
+            raise RuntimeError("throttled")
+        self.puts.append(call)
+
+
+async def test_metrics_go_to_their_own_log_group_not_to_stdout(caplog, capsys):
+    m = Metrics()
+    m.outcome("ACCEPTED", None)
+    lines = m.emf_lines("Auction")
+    client = FakeLogsClient()
+    sink = CloudWatchEmfSink("/ecs/leilao-dev/metrics", "us-east-1", client=client, stream="app/t1")
+
+    await sink.send(lines)
+    await sink.send([])  # intervalo ocioso: nenhuma chamada
+    await sink.send(lines)
+
+    assert client.streams == ["app/t1"]  # o stream é criado uma vez só
+    assert len(client.puts) == 2
+    put = client.puts[0]
+    assert put["logGroupName"] == "/ecs/leilao-dev/metrics" and put["logStreamName"] == "app/t1"
+    assert [e["message"].encode() for e in put["logEvents"]] == lines
+    assert put["logEvents"][0]["timestamp"] == orjson.loads(lines[0])["_aws"]["Timestamp"]
+    assert capsys.readouterr().out == ""  # nada de métrica no stdout (o log da aplicação)
+
+    # Falha no CloudWatch vira aviso, sem derrubar a exportação.
+    failing = CloudWatchEmfSink("/g", "us-east-1", client=FakeLogsClient(fail=True), stream="s")
+    await failing.send(lines)
+    assert any("falha ao enviar métricas" in r.getMessage() for r in caplog.records)

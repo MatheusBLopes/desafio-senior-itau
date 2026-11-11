@@ -1,6 +1,6 @@
 # ElastiCache for Valkey: ~20% mais barato que Redis OSS, compatível com Lua, Streams e Pub/Sub.
 # MVP com 1 nó. Para HA: node_count = 2 (réplica + failover automático Multi-AZ). Durabilidade
-# de lance confirmado exige MemoryDB for Valkey (ver docs/finops.md), não AOF (indisponível aqui).
+# de lance confirmado exige MemoryDB for Valkey, não AOF (indisponível aqui).
 resource "aws_elasticache_subnet_group" "this" {
   name       = var.name
   subnet_ids = var.subnet_ids

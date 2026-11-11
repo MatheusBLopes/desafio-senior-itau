@@ -17,7 +17,7 @@ variable "app_port" {
   default = 8080
 }
 
-# 1 vCPU / 2 GB: um processo Python (asyncio) usa até um núcleo. Medido (load-test/capacity.sh):
+# 1 vCPU / 2 GB: um processo Python (asyncio) usa até um núcleo. Medido em teste de carga:
 # ~2.200 lances/s por task de 1 vCPU contra ~1.000/s com 0,5 vCPU, que era throttled pela cota do cgroup.
 # Custo por lance igual ou menor e metade das tasks. 2 GB é o mínimo do Fargate para 1 vCPU (usa ~80 MB).
 variable "cpu" {

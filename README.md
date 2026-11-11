@@ -39,7 +39,7 @@ Transcrição do enunciado recebido.
 | **Relógio confiável** | Prazo e anti-sniping usam só o `TIME` do Valkey, nunca o relógio do cliente ou da task. | `place_bid.lua`, `RedisClock` (`storage/valkey.py`) |
 | **Sem lance inválido** | Na mesma execução atômica: leilão `OPEN`, dentro do prazo, valor ≥ preço inicial (1º lance) ou ≥ preço atual + incremento. No empate, vence quem chegou primeiro. | `place_bid.lua` |
 | **Sem duplicado** | `Idempotency-Key` obrigatório, memorizado por (leilão, usuário, key) com o resultado original, inclusive rejeições. Mesma key com outro valor: `422` (exceto se o original foi rejeitado no pré-filtro por já estar superado). A key de um lance aceito vive até o fim do leilão + 24 h. No Postgres, `PK (auction_id, seq)` e `UNIQUE (auction_id, user_id, idempotency_key)`; uma reentrega é ignorada e uma colisão real vai para `bid_conflicts`, com alarme. | `place_bid.lua`, `BidPersister` (`persistence/persister.py`), `storage/migrations/V1`/`V2__*.sql` |
-| **Tempo real** | O Lua publica no Pub/Sub; cada task envia snapshots por WebSocket aos seus clientes, consolidados a cada 150 ms (conflation). Prorrogação e encerramento saem na hora. | `realtime/` (`listener.py`, `broadcaster.py`) |
+| **Tempo real** | O Lua publica no Pub/Sub; cada task envia snapshots por WebSocket aos seus clientes, consolidados a cada 150 ms (conflation). Prorrogação e encerramento saem na hora. Quem conecta recebe o estado atual na hora: do cache da task ou, se ela ainda não viu o leilão (task nova), do Valkey. | `realtime/` (`listener.py`, `broadcaster.py`) |
 | **Alta concorrência** | O caminho do lance é 1 script Lua no Valkey (mais o rate limit); o Postgres fica fora dele (write-behind via Redis Streams). Um pré-filtro na task resolve 97% dos lances (os já superados) sem chamar o Lua. Acima da capacidade, a task devolve o excesso como 503 em vez de enfileirar (load shedding). | `bidding/service.py`, `persistence/stream_consumer.py`, `LoadShedder` (`api/middleware.py`) |
 
 **Além do enunciado:**
@@ -110,7 +110,7 @@ cd bid-service && uv run pytest
 
 ### AWS
 
-Implantado e validado em 2026-11-03 numa conta pessoal; o ambiente foi removido depois, para não gerar custo. Para recriar, os pré-requisitos são AWS CLI com credenciais, Terraform ≥ 1.10 e Docker. O build ARM64 não precisa de buildx nem QEMU (ver `bid-service/Dockerfile`).
+Implantado e validado numa conta pessoal. Para criar o ambiente, os pré-requisitos são AWS CLI com credenciais, Terraform ≥ 1.10 e Docker. O build ARM64 não precisa de buildx nem QEMU (ver `bid-service/Dockerfile`).
 
 ```bash
 # 1. Bucket do state (uma vez)
@@ -196,7 +196,7 @@ npx wscat -c ws://localhost:8080/ws/auctions/$ID
 
 ## 6. Testes e resultados
 
-### Automatizados (`uv run pytest`: 47 testes, Valkey e Postgres reais)
+### Automatizados (`uv run pytest`: 58 testes, Valkey e Postgres reais)
 
 A sessão de testes sobe Valkey e Postgres em containers e a aplicação inteira num servidor uvicorn em portas aleatórias, no mesmo event loop dos testes.
 
@@ -204,14 +204,15 @@ A sessão de testes sobe Valkey e Postgres em containers e a aplicação inteira
 |---|---|
 | `test_bid_rules.py` (12) | 1º lance cobre o preço inicial sem incremento; incremento; empate rejeitado; retry devolve o original; retry de rejeição devolve a mesma rejeição; key reutilizada com outro valor; key com escopo por usuário; lance após o prazo; anti-sniping; pré-filtro respeita retries; rejeição do pré-filtro não trava a key e nunca duplica; valores no teto (15 dígitos em centavos) sem perda de precisão; key de aceite vive até o fim do leilão |
 | `test_concurrency.py` (1) | **500 usuários × 20 lances simultâneos (10 mil) + ~1.000 retries concorrentes** em corrotinas: seqs únicos e contíguos; cada lance aceito ≥ anterior + incremento; nenhuma key aceita duas vezes; vencedor correto; Postgres converge com zero violações |
-| `test_api.py` (8) | Contrato HTTP (201/200/409/422/400/404, valor como número ou string); métricas e health detalhado só na porta interna, `/readyz` e `/livez` na pública; encerramento com vencedor persistido; `afterSeq` com o consumer parado (lê do stream) e depois do banco; **`afterSeq` com lotes gravados fora de ordem** (não pula seqs); **`FLUSHALL` no Valkey** e reidratação (seq continua em 4 e o preço não volta); WebSocket recebe snapshot e encerramento; **cliente WS que tenta publicar é desconectado e um caminho fora de um leilão é recusado** |
-| `test_failure_modes.py` (6) | Lance aceito que colide no Postgres vai para `bid_conflicts` com métrica; Valkey atrás do banco (failover) alcança o banco em vez de reusar seqs; entrada órfã no ZSET de encerramento e membro inválido no SET de streams não travam os outros leilões; **Valkey que perdeu o cache de scripts (`NOSCRIPT`)** continua aceitando lances; **consumer persiste pelo aviso do Pub/Sub em < 1 s e, se o aviso se perder, na varredura** |
-| `test_auth.py` (9) | JWT: token válido e cache; expirado, outro emissor, outro app client, id token no lugar do access token, usuário inválido; `alg=none` e confusão HS256 com a chave pública; payload adulterado e chave de outro emissor; rotação de chave sem inundar o JWKS; Cognito fora = 503. API: cadastro, login, lance com token (o `X-User-Id` é ignorado), 401 sem token antes de validar o corpo |
-| `test_degradation.py` (4) | Postgres fora: task continua pronta, lances aceitos, leitura 503; Valkey sem memória: 503 sem escrita parcial; corpo grande 413 e chunked 411; o consumer regrava o próprio lote que falhou sem esperar a reivindicação |
-| `test_load_shedding.py` (2) | Acima do limite de requisições em andamento, `503` com `Retry-After`, sem bloquear as probes; Valkey indisponível vira `503`, não `500` |
+| `test_api.py` (10) | Contrato HTTP (201/200/409/422/400/404, valor como número ou string); métricas e health detalhado só na porta interna, `/readyz` e `/livez` na pública; encerramento com vencedor persistido; `afterSeq` com o consumer parado (lê do stream) e depois do banco; **`afterSeq` com lotes gravados fora de ordem** (não pula seqs); **`FLUSHALL` no Valkey** e reidratação (seq continua em 4 e o preço não volta); WebSocket recebe snapshot e encerramento; **cliente WS que tenta publicar é desconectado e um caminho fora de um leilão é recusado**; WebSocket recebe o estado atual numa task que nunca viu o leilão; **eventos perdidos numa queda do Pub/Sub chegam aos clientes na reassinatura** e o cache local velho é descartado |
+| `test_failure_modes.py` (9) | Lance aceito que colide no Postgres vai para `bid_conflicts` com métrica; Valkey atrás do banco (failover) alcança o banco em vez de reusar seqs; entrada órfã no ZSET de encerramento e membro inválido no SET de streams não travam os outros leilões; **Valkey que perdeu o cache de scripts (`NOSCRIPT`)** continua aceitando lances; **consumer persiste pelo aviso do Pub/Sub em < 1 s e, se o aviso se perder, na varredura**; **leilão aberto que ficou fora da agenda de encerramento é recolocado pelo reconciliador**, sem trazer de volta um prazo já prorrogado; tarefa de fundo que falha é reiniciada |
+| `test_auth.py` (10) | JWT: token válido e cache; expirado, outro emissor, outro app client, id token no lugar do access token, usuário inválido; `alg=none` e confusão HS256 com a chave pública; payload adulterado e chave de outro emissor; rotação de chave sem inundar o JWKS; Cognito fora = 503, sem uma busca do JWKS por requisição. API: cadastro, login, lance com token (o `X-User-Id` é ignorado), 401 sem token antes de validar o corpo |
+| `test_degradation.py` (4) | Postgres fora: task continua pronta, lances aceitos, leitura 503; Valkey sem memória: 503 sem escrita parcial; corpo grande 413 e chunked 411 (em qualquer capitalização do header); o consumer regrava o próprio lote que falhou sem esperar a reivindicação |
+| `test_load_shedding.py` (3) | Acima do limite de requisições em andamento, `503` com `Retry-After`, sem bloquear as probes nem as métricas da porta interna; Valkey indisponível vira `503`, não `500` |
 | `test_event_dispatch.py` (1) | Eventos do Pub/Sub são aplicados na ordem de publicação (reidratação seguida de lance) |
 | `test_ip_rate_limiter.py` (3) | Unitário: limite por IP independe do `X-User-Id`; reposição; buckets ociosos são descartados; o IP do cliente só é lido do `X-Forwarded-For` quando a conexão vem de um proxy privado |
-| `test_emf.py` (1) | As métricas exportadas ao CloudWatch têm exatamente os nomes e dimensões que os alarmes e o dashboard do Terraform consultam |
+| `test_emf.py` (2) | As métricas exportadas ao CloudWatch têm exatamente os nomes e dimensões que os alarmes e o dashboard do Terraform consultam; um intervalo sem atividade não escreve linhas; as linhas vão para o grupo de métricas, não para o stdout |
+| `test_request_log.py` (3) | Cada requisição recebe um `X-Request-Id` (gerado, ou o do cliente se for seguro), devolvido na resposta e presente em todos os logs dela; uma linha por requisição com o contexto da rota; health checks não geram linha; 5xx sai como WARNING |
 
 Correções críticas foram validadas por mutação: com o bug reintroduzido no código, o teste correspondente falha.
 
@@ -243,11 +244,17 @@ Ryzen x86 não é Graviton ARM: os números locais servem para dimensionar e nã
 
 | Sinal | Local | AWS |
 |---|---|---|
-| **Logs** | `docker compose logs`: JSON (`JSON_LOGS=true`) com `auctionId`, `userId` e `seq` do contexto da requisição (`contextvars`) | CloudWatch Logs `/ecs/leilao-dev`, retenção de 7 dias, com `trace_id` e `span_id` do OpenTelemetry |
-| **Métricas** | `:8081/metrics` (Prometheus; porta interna, fora do nginx/ALB) + Prometheus/Grafana (profile `observability`) | Namespace `Auction` no CloudWatch via Embedded Metric Format: a cada minuto, linhas JSON no stdout que o CloudWatch Logs transforma em métricas, sem `PutMetricData`; mais as métricas nativas de ALB, ECS, ElastiCache e RDS |
+| **Logs** | `make logs`: JSON (`JSON_LOGS=true`; sem ele, texto legível) | CloudWatch Logs `/ecs/leilao-dev`, retenção de 7 dias, com `trace_id` e `span_id` do OpenTelemetry; só logs da aplicação: as métricas vão para `/ecs/leilao-dev/metrics` e o sidecar ADOT para `/ecs/leilao-dev/adot` (1 dia cada); 7 consultas salvas no Logs Insights (`leilao-dev/...`) |
+| **Métricas** | `:8081/metrics` (Prometheus; porta interna, fora do nginx/ALB) + Prometheus/Grafana (profile `observability`) | Namespace `Auction` no CloudWatch via Embedded Metric Format: a cada minuto com atividade, linhas JSON enviadas ao grupo `/ecs/leilao-dev/metrics`, que o CloudWatch Logs transforma em métricas, sem `PutMetricData`; mais as métricas nativas de ALB, ECS, ElastiCache e RDS |
 | **Traces** | — | Auto-instrumentação OpenTelemetry (FastAPI, redis, asyncpg) → sidecar ADOT → X-Ray, 5% de amostragem |
 | **Dashboard e alarmes** | Grafana | Dashboard `leilao-dev` + 10 alarmes → SNS e-mail |
 | **Health** | `/readyz` e `/livez` na porta pública (o readiness checa só o Valkey, para uma queda do Postgres não tirar as tasks do ALB); `:8081/health` com o detalhe por componente | Target group do ALB em `/readyz` |
+
+**Logs da aplicação:** só os eventos da aplicação; o uvicorn e as bibliotecas aparecem apenas a partir de WARNING.
+- Cada requisição recebe um `requestId`, devolvido no header `X-Request-Id` e presente em todos os logs dela: basta copiá-lo da resposta para achar tudo o que ela fez.
+- Uma linha por requisição (`POST /auctions/{auction_id}/bids → 201 em 1.0 ms`) com `userId`, `auctionId`, `amount`, `idempotencyKey`, `seq`, `outcome`/`reason`, `errorCode`, `status` e `durationMs`, como campos filtráveis. Health checks não geram linha.
+- Eventos de negócio: leilão criado, prazo prorrogado (anti-sniping), leilão encerrado com vencedor e preço final, lances gravados no banco, WebSocket aberto e fechado (com motivo e duração).
+- `LOG_LEVEL` (padrão `INFO`) e `LOG_REQUESTS` (padrão `true`; `false` no teste de carga tira a linha por requisição e mantém o `requestId`).
 
 **Métricas de negócio:**
 - `auction.bids{outcome,reason}`
@@ -287,6 +294,9 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 | **Valkey cai / reinicia** | Estado reconstruído do Postgres (`NOT_LOADED` → reidratação; reconciliador a cada 30 s). O seq continua de `max(seq)` (testado). | Lances aceitos e ainda não persistidos se perdem. Réplica Multi-AZ reduz a janela; `WAIT 1 <timeout>` **pela aplicação logo após o `EVALSHA`** (o `WAIT` não pode ser chamado dentro do Lua) troca latência por durabilidade; **MemoryDB for Valkey** zera a perda de lance confirmado. O ElastiCache não oferece AOF nas versões atuais |
 | **Failover para réplica atrasada** | O Valkey pode voltar com `seq` menor que o do banco | O reconciliador (e o consumer, ao detectar colisão) avança o estado para o do Postgres; um lance que colidiu antes disso vai para `bid_conflicts`, com alarme (testado) |
 | **Consumer atrasado** | O lance continua sendo aceito; o stream retém (MAXLEN ~100k) | Alarme de `auction.stream.backlog`. `GET /bids` lê do stream quando o banco está atrás |
+| **Pub/Sub cai** | Os eventos publicados durante a queda não são reentregues | Ao reassinar, a task descarta o cache local e relê do Valkey os leilões com clientes conectados, que recebem o estado atual ou o encerramento (testado). O consumer pega os lances na varredura |
+| **Falha entre o Lua e a agenda de encerramento** | O `ZADD`/`SADD` das chaves globais não é atômico com o script que carrega o leilão | Toda carga de leilão aberto refaz o registro (`ZADD NX`), inclusive a do reconciliador (testado) |
+| **Tarefa de fundo falha** | Closer, reconciliador, listener e snapshots rodam supervisionados | Exceção não prevista é registrada e a tarefa reinicia em 1 s (testado) |
 | **Task morre** | Pendentes do consumer são reivindicados por outra task (`XCLAIM`) | O cliente WS reconecta e se recupera via `afterSeq` |
 | **Retry do cliente** | Devolve o resultado original | Idempotency key |
 | **Relógios dessincronizados** | Irrelevante | Só se usa o `TIME` do Valkey |
@@ -347,8 +357,9 @@ Documentado, não provisionado. Os itens marcados com variável já estão param
 │   └── Dockerfile                multi-stage, multi-arquitetura (ARM64), OpenTelemetry embutido
 ├── docker-compose.yml            réplicas da app + nginx + Valkey + Postgres (+ Prometheus/Grafana)
 ├── infra/local/                  nginx, Prometheus, Grafana
-├── infra/terraform/              bootstrap + módulos (network, alb, ecs, elasticache, rds, ecr, observability, budget) + envs/dev
+├── infra/terraform/              bootstrap + módulos (network, alb, ecs, elasticache, rds, ecr, cognito, observability, budget) + envs/dev
 ├── collection/                   collection do Bruno: o fluxo completo contra a AWS, com testes
 ├── scripts/                      build-push.sh (imagem ARM64 para o ECR)
+├── Makefile                      atalhos dos comandos (make help)
 └── arquitetura-aws.png           desenho da arquitetura AWS
 ```

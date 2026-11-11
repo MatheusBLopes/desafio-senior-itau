@@ -57,18 +57,23 @@ class AuctionStateLoader:
             ends_at_ms=from_datetime(auction.ends_at), extend_window_ms=auction.anti_sniping_window_ms,
             extend_by_ms=auction.anti_sniping_extend_ms)
 
+        if auction.status == OPEN:
+            # Fora do script porque são chaves globais (outro slot do cluster), então não é atômico com ele.
+            # Por isso roda em TODA carga, não só na primeira: se uma falha separou o hash do registro
+            # (ZADD que estourou o prazo, task morta no meio), a próxima carga ou o reconciliador o refaz.
+            # Sem isso o leilão nunca entraria na agenda do closer e ficaria aberto para sempre.
+            # NX: não troca um prazo já estendido pelo anti-sniping pelo prazo mais antigo do banco.
+            await self._redis.zadd(keys.ENDING, {str(auction.id): from_datetime(auction.ends_at)}, nx=True)
+            await self._redis.sadd(keys.ACTIVE_STREAMS, str(auction.id))
+
         if result == self.CAUGHT_UP:
             log.warning("Valkey estava atrás do Postgres e foi alinhado ao banco",
                         extra=fields(auctionId=auction.id, seq=seq))
             return True
         if result != self.LOADED:
             return False
-        retention_s = self._settings.closed_retention_s
-        if auction.status == OPEN:
-            # Fora do script porque são chaves globais (outro slot do cluster). Ambos idempotentes.
-            await self._redis.zadd(keys.ENDING, {str(auction.id): from_datetime(auction.ends_at)})
-            await self._redis.sadd(keys.ACTIVE_STREAMS, str(auction.id))
-        else:
+        if auction.status != OPEN:
+            retention_s = self._settings.closed_retention_s
             await self._redis.expire(keys.auction_key(auction.id), retention_s)
             await self._redis.expire(keys.stream_key(auction.id), retention_s)
         log.info("estado do leilão carregado no Valkey",

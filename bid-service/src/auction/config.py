@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 
 def _env(name: str, default: str) -> str:
@@ -78,6 +79,9 @@ class Settings:
     log_requests: bool = True
     # Exporta as métricas de negócio para o CloudWatch (namespace Auction) via Embedded Metric Format.
     cloudwatch_emf: bool = False
+    # Log group só de métricas (na AWS, /ecs/<ambiente>/metrics): as linhas EMF vão para ele por PutLogEvents
+    # e não se misturam aos logs. Vazio: saem no stdout.
+    cloudwatch_emf_log_group: str = ""
     metrics_namespace: str = "Auction"
     metrics_step_s: float = 60
 
@@ -85,8 +89,9 @@ class Settings:
     def from_env() -> "Settings":
         """Monta a configuração a partir das variáveis de ambiente (os nomes estão no Terraform e no Compose)."""
         return Settings(
+            # quote: uma senha com @, /, # ou % quebraria a URL (ou mudaria o host) se entrasse crua.
             db_dsn=_env("DB_DSN", "postgresql://{user}:{password}@{host}:{port}/{name}".format(
-                user=_env("DB_USER", "auction"), password=_env("DB_PASSWORD", "auction"),
+                user=quote(_env("DB_USER", "auction"), safe=""), password=quote(_env("DB_PASSWORD", "auction"), safe=""),
                 host=_env("DB_HOST", "localhost"), port=_env("DB_PORT", "5432"), name=_env("DB_NAME", "auction"))),
             db_pool_size=int(_env("DB_POOL_SIZE", "10")),
             redis_host=_env("REDIS_HOST", "localhost"),
@@ -107,4 +112,5 @@ class Settings:
             cognito_user_pool_id=_env("COGNITO_USER_POOL_ID", ""),
             cognito_client_id=_env("COGNITO_CLIENT_ID", ""),
             cloudwatch_emf=_bool("CLOUDWATCH_EMF", False),
+            cloudwatch_emf_log_group=_env("CLOUDWATCH_EMF_LOG_GROUP", ""),
         )

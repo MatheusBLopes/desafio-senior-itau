@@ -75,6 +75,7 @@ class JwtVerifier:
     """
 
     REFRESH_INTERVAL_S = 30
+    FAILURE_BACKOFF_S = 2
     LEEWAY_S = 5
     CACHE_SIZE = 10_000
 
@@ -145,7 +146,7 @@ class JwtVerifier:
         return key
 
     async def _refresh(self) -> None:
-        """Rebusca o JWKS no máximo uma vez a cada REFRESH_INTERVAL_S; numa falha, permite tentar de novo logo."""
+        """Rebusca o JWKS no máximo uma vez a cada REFRESH_INTERVAL_S; depois de uma falha, a cada FAILURE_BACKOFF_S."""
         async with self._refresh_lock:
             if self._clock() - self._last_refresh < self.REFRESH_INTERVAL_S:
                 return
@@ -155,7 +156,9 @@ class JwtVerifier:
             except Exception as e:
                 log.warning("falha ao buscar as chaves do Cognito (JWKS)", extra=fields(error=e))
                 self._fetch_failed = True
-                self._last_refresh = float("-inf")  # tenta de novo na próxima requisição
+                # Tenta de novo logo, mas não a cada requisição: com o Cognito fora, cada busca espera até
+                # 5 s e as requisições fariam fila neste lock, ocupando as vagas do LoadShedder.
+                self._last_refresh = self._clock() - self.REFRESH_INTERVAL_S + self.FAILURE_BACKOFF_S
                 return
             self._fetch_failed = False
             self._keys = {jwk["kid"]: RSAAlgorithm.from_jwk(jwk) for jwk in jwks.get("keys", [])

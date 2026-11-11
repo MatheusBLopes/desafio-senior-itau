@@ -137,7 +137,7 @@ async def test_pre_filter_rejects_locally_but_still_honours_retries(server):
 
 
 async def test_pre_filter_rejection_does_not_lock_the_key_but_never_duplicates(server):
-    # Contrato (ADR-03/05): só um lance avaliado pelo Lua trava a key. A rejeição local por lance
+    # Contrato: só um lance avaliado pelo Lua trava a key. A rejeição local por lance
     # superado não é gravada, para não custar uma key no Valkey por lance no pico.
     c = server.c
     aid = await new_auction(c, 60)
