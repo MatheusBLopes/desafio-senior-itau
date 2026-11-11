@@ -2,8 +2,8 @@
 
 import pytest
 
-from auction.bids import ClientIpRateLimiter, client_ip
-from auction.common import ApiError
+from auction.bidding.rate_limit import IpRateLimiter, client_ip
+from auction.core.errors import ApiError
 from auction.config import RateLimitConfig
 
 
@@ -21,11 +21,11 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def limiter(clock: FakeClock) -> ClientIpRateLimiter:
-    return ClientIpRateLimiter(RateLimitConfig(per_ip_capacity=3, per_ip_refill_per_second=1), clock)
+def limiter(clock: FakeClock) -> IpRateLimiter:
+    return IpRateLimiter(RateLimitConfig(per_ip_capacity=3, per_ip_refill_per_second=1), clock)
 
 
-def assert_rate_limited(limiter: ClientIpRateLimiter, ip: str) -> None:
+def assert_rate_limited(limiter: IpRateLimiter, ip: str) -> None:
     with pytest.raises(ApiError) as e:
         limiter.check(ip)
     assert e.value.status == 429

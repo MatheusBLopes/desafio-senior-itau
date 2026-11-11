@@ -8,19 +8,20 @@
 
 local auctionKey, streamKey = KEYS[1], KEYS[2]
 
+-- Inteiro como string sem notação científica (o tostring do Lua usaria 1e+15).
 local function int(n) return string.format('%d', n) end
 
 if redis.call('EXISTS', auctionKey) == 0 then
     return { 'NOT_LOADED', 0 }
 end
 
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local redisTime = redis.call('TIME')
+local now = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 
-local f = redis.call('HMGET', auctionKey, 'status', 'endsAt', 'currentPrice', 'leaderId', 'seq')
-local status = f[1]
-local endsAt = tonumber(f[2])
-local seq = tonumber(f[5])
+local state = redis.call('HMGET', auctionKey, 'status', 'endsAt', 'currentPrice', 'leaderId', 'seq')
+local status = state[1]
+local endsAt = tonumber(state[2])
+local seq = tonumber(state[5])
 
 if status == 'CLOSED' then
     return { 'ALREADY_CLOSED', endsAt }
@@ -32,8 +33,8 @@ end
 local winnerId = ''
 local finalPrice = 0
 if seq > 0 then
-    winnerId = f[4]
-    finalPrice = tonumber(f[3])
+    winnerId = state[4]
+    finalPrice = tonumber(state[3])
 end
 
 redis.call('HSET', auctionKey, 'status', 'CLOSED', 'closedAt', int(now))

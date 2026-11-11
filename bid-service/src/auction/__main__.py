@@ -2,7 +2,7 @@
 
 Um processo por task (escala horizontal no ECS, não com workers). Um único servidor uvicorn escuta
 em duas portas: 8080 (API, WebSocket, /livez, /readyz) e 8081 (métricas e health detalhado, só na
-rede interna). O middleware separate_ports decide o que cada porta atende.
+rede interna). O middleware PortSeparation (api/middleware.py) decide o que cada porta atende.
 """
 
 import socket
@@ -14,6 +14,7 @@ from .config import Settings
 
 
 def _listen(port: int) -> socket.socket:
+    """Socket TCP já ligado à porta, para o uvicorn escutar em duas portas no mesmo processo."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", port))
@@ -21,6 +22,7 @@ def _listen(port: int) -> socket.socket:
 
 
 def main() -> None:
+    """Lê a configuração e sobe o uvicorn com os parâmetros de produção (uvloop, keep-alive, ping do WebSocket)."""
     settings = Settings.from_env()
     configure(settings)
     config = uvicorn.Config(

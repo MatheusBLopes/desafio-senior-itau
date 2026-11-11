@@ -5,10 +5,12 @@ from dataclasses import replace
 
 import httpx
 
-from auction.app import LoadShedder, create_redis
-from auction.bids import BidRepository, BidService, RateLimiter
-from auction.common import json_response
-from auction.lua import LuaScripts
+from auction.api.middleware import LoadShedder
+from auction.api.responses import json_response
+from auction.bidding.rate_limit import UserRateLimiter
+from auction.bidding.service import BidService
+from auction.storage.scripts import LuaScripts
+from auction.storage.valkey import create_redis
 
 from .conftest import key, new_auction
 
@@ -45,9 +47,9 @@ async def test_valkey_unavailable_returns_503_with_retry_after(server, http):
     # Um BidService cujo Valkey não responde (porta fechada), no lugar do da task.
     dead = create_redis(replace(c.settings, redis_port=1))
     original = c.bids
-    scripts = LuaScripts.register(dead)  # o script fica preso ao cliente em que foi registrado
-    c.bids = BidService(dead, scripts, c.loader, c.cache, RateLimiter(scripts, c.settings.rate_limit),
-                        BidRepository(c.pool), c.metrics, c.settings)
+    scripts = LuaScripts.register(dead, c.settings)  # o script fica preso ao cliente em que foi registrado
+    c.bids = BidService(dead, scripts, c.loader, c.cache, UserRateLimiter(scripts, c.settings.rate_limit),
+                        c.metrics, c.settings)
     try:
         r = await http.post(f"/auctions/{aid}/bids", json={"amount": "100.00"},
                             headers={"X-User-Id": "ana", "Idempotency-Key": key()})

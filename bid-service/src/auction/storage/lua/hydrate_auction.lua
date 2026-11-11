@@ -17,8 +17,10 @@ local seq = tonumber(ARGV[6])
 local endsAt = tonumber(ARGV[7])
 local status = ARGV[1]
 
+-- Inteiro como string sem notação científica (o tostring do Lua usaria 1e+15).
 local function int(n) return string.format('%d', n) end
 
+-- Publica AUCTION_LOADED com o estado carregado, para as tasks trocarem o cache local.
 local function publishLoaded()
     -- Avisa as tasks: o cache local do pré-filtro deve ser substituído (o preço pode ter voltado).
     local minimumNext = tonumber(ARGV[2])
@@ -49,9 +51,9 @@ redis.call('HSET', auctionKey,
     'extendWindowMs', ARGV[8], 'extendByMs', ARGV[9])
 
 -- O grupo começa em 0 para que nenhum evento novo escape do consumer.
-local ok = redis.pcall('XGROUP', 'CREATE', streamKey, ARGV[10], '0', 'MKSTREAM')
-if type(ok) == 'table' and ok.err and not string.find(ok.err, 'BUSYGROUP') then
-    return redis.error_reply(ok.err)
+local created = redis.pcall('XGROUP', 'CREATE', streamKey, ARGV[10], '0', 'MKSTREAM')
+if type(created) == 'table' and created.err and not string.find(created.err, 'BUSYGROUP') then
+    return redis.error_reply(created.err)
 end
 
 publishLoaded()

@@ -13,7 +13,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from auction.auth import ApiError, Authenticator, JwtVerifier
+from auction.auth.authenticator import Authenticator
+from auction.auth.tokens import JwtVerifier
+from auction.core.errors import ApiError
 
 from .conftest import key
 

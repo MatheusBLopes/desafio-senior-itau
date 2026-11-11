@@ -9,14 +9,14 @@
 local capacity = tonumber(ARGV[1])
 local refillPerSec = tonumber(ARGV[2])
 
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local redisTime = redis.call('TIME')
+local now = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 
-local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
-local tokens = tonumber(b[1]) or capacity
-local ts = tonumber(b[2]) or now
+local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(bucket[1]) or capacity
+local lastRefillMs = tonumber(bucket[2]) or now
 
-tokens = math.min(capacity, tokens + (now - ts) * refillPerSec / 1000)
+tokens = math.min(capacity, tokens + (now - lastRefillMs) * refillPerSec / 1000)
 
 local allowed = 0
 if tokens >= 1 then

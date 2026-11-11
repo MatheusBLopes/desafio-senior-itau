@@ -6,8 +6,9 @@ from dataclasses import replace
 
 import pytest
 
-from auction.auctions import AuctionService
-from auction.persistence import BidPersister, BidStreamConsumer
+from auction.lifecycle.service import AuctionService
+from auction.persistence.persister import BidPersister
+from auction.persistence.stream_consumer import BidStreamConsumer
 
 from .conftest import count, eventually, key, new_auction
 

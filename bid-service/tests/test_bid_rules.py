@@ -3,9 +3,10 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from auction import common
-from auction.auctions import CreateAuctionRequest
-from auction.bids import ACCEPTED, AUCTION_CLOSED, BID_TOO_LOW, IDEMPOTENCY_KEY_REUSED, REJECTED
+from auction.core.time import to_datetime
+from auction.storage import keys
+from auction.lifecycle.models import CreateAuctionRequest
+from auction.bidding.result import ACCEPTED, AUCTION_CLOSED, BID_TOO_LOW, IDEMPOTENCY_KEY_REUSED, REJECTED
 
 from .conftest import eventually, key, new_auction
 
@@ -112,7 +113,7 @@ async def test_bid_inside_anti_sniping_window_extends_deadline(server):
     bid = await c.bids.place(aid, "ana", key(), 10_000)
 
     assert bid.extended
-    assert common.to_datetime(bid.ends_at) > before + timedelta(seconds=20)
+    assert to_datetime(bid.ends_at) > before + timedelta(seconds=20)
 
 
 async def test_pre_filter_rejects_locally_but_still_honours_retries(server):
@@ -146,7 +147,7 @@ async def test_pre_filter_rejection_does_not_lock_the_key_but_never_duplicates(s
 
     rejected = await c.bids.place(aid, "bia", k, 20_000)
     assert rejected.filtered
-    assert not await c.redis.exists(common.idempotency_key(aid, "bia", k))
+    assert not await c.redis.exists(keys.idempotency_key(aid, "bia", k))
     assert (await c.bids.place(aid, "bia", k, 20_000)).reason == BID_TOO_LOW
 
     new_bid = await c.bids.place(aid, "bia", k, 60_000)
@@ -164,7 +165,7 @@ async def test_large_amounts_keep_cent_precision(server):
     view = await c.auctions.create(CreateAuctionRequest(
         title="Item caro", startingPrice=top, minIncrement=top, durationSeconds=60,
         antiSnipingWindowSeconds=0, antiSnipingExtendSeconds=0))
-    aid = common.auction_id_or_none(view["id"])
+    aid = keys.auction_id_or_none(view["id"])
 
     first = await c.bids.place(aid, "ana", key(), 99_999_999_999_999)
 
@@ -187,5 +188,5 @@ async def test_accepted_key_outlives_the_auction_while_rejection_keeps_the_ttl(s
     assert not (await c.bids.place(aid, "bia", rejected, 10_000)).filtered
 
     hour = 3600
-    assert await c.redis.ttl(common.idempotency_key(aid, "ana", accepted)) >= (3 * 24 + 23) * hour
-    assert await c.redis.ttl(common.idempotency_key(aid, "bia", rejected)) <= 24 * hour
+    assert await c.redis.ttl(keys.idempotency_key(aid, "ana", accepted)) >= (3 * 24 + 23) * hour
+    assert await c.redis.ttl(keys.idempotency_key(aid, "bia", rejected)) <= 24 * hour

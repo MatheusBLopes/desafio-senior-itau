@@ -5,7 +5,7 @@ from pathlib import Path
 
 import orjson
 
-from auction.observability import Metrics
+from auction.observability.metrics import Metrics
 
 TERRAFORM = Path(__file__).resolve().parents[2] / "infra/terraform/modules/observability/main.tf"
 

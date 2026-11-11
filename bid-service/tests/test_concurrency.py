@@ -11,7 +11,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 
-from auction.bids import BidResult
+from auction.bidding.result import BidResult
 
 from .conftest import count, eventually, new_auction
 

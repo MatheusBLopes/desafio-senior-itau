@@ -17,15 +17,16 @@ local userId = ARGV[1]
 local amount = tonumber(ARGV[2])
 local fingerprint = ARGV[3]
 
+-- Inteiro como string sem notação científica (o tostring do Lua usaria 1e+15).
 local function int(n) return string.format('%d', n) end
 
 -- 1. Idempotência: um retry devolve exatamente a resposta original.
-local previous = redis.call('HMGET', idemKey, 'h', 'r')
-if previous[1] then
-    if previous[1] ~= fingerprint then
-        return { 'MISMATCH', previous[2] }
+local remembered = redis.call('HMGET', idemKey, 'h', 'r')
+if remembered[1] then
+    if remembered[1] ~= fingerprint then
+        return { 'MISMATCH', remembered[2] }
     end
-    return { 'REPLAY', previous[2] }
+    return { 'REPLAY', remembered[2] }
 end
 
 -- Estado ausente (restart do Valkey ou leilão expirado da memória): a app reidrata do Postgres.
@@ -34,25 +35,27 @@ if redis.call('EXISTS', auctionKey) == 0 then
 end
 
 -- Relógio único: o do servidor Valkey, nunca o do cliente ou da task.
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local redisTime = redis.call('TIME')
+local now = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 
-local f = redis.call('HMGET', auctionKey, 'status', 'endsAt', 'currentPrice', 'startingPrice',
+local state = redis.call('HMGET', auctionKey, 'status', 'endsAt', 'currentPrice', 'startingPrice',
     'minIncrement', 'seq', 'extendWindowMs', 'extendByMs')
-local status = f[1]
-local endsAt = tonumber(f[2])
-local currentPrice = tonumber(f[3])
-local startingPrice = tonumber(f[4])
-local minIncrement = tonumber(f[5])
-local seq = tonumber(f[6])
-local extendWindowMs = tonumber(f[7])
-local extendByMs = tonumber(f[8])
+local status = state[1]
+local endsAt = tonumber(state[2])
+local currentPrice = tonumber(state[3])
+local startingPrice = tonumber(state[4])
+local minIncrement = tonumber(state[5])
+local seq = tonumber(state[6])
+local extendWindowMs = tonumber(state[7])
+local extendByMs = tonumber(state[8])
 
+-- Menor valor aceito agora: o preço inicial no primeiro lance; depois, preço atual + incremento.
 local function minimumNext()
     if seq == 0 then return startingPrice end
     return currentPrice + minIncrement
 end
 
+-- Memoriza o resultado na idempotency key (com o fingerprint) e define quando ela expira.
 local function remember(result, expireAtMs)
     redis.call('HSET', idemKey, 'h', fingerprint, 'r', result)
     if expireAtMs then

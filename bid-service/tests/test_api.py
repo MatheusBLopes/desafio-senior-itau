@@ -8,7 +8,7 @@ import orjson
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from auction import common
+from auction.storage import keys
 
 from .conftest import count, eventually, key
 
@@ -118,7 +118,7 @@ async def test_after_seq_does_not_skip_bids_when_batches_are_persisted_out_of_or
         for i in range(3):
             await bid(http, aid, f"user{i}", key(), f"{100 + i * 10}.00")
         # Outra task lê os seqs 1..3 e ainda não fez commit: ficam pendentes no grupo.
-        await c.redis.xreadgroup(c.settings.consumer_group, "task-lenta", {common.stream_key(aid): ">"}, count=10)
+        await c.redis.xreadgroup(c.settings.consumer_group, "task-lenta", {keys.stream_key(aid): ">"}, count=10)
     finally:
         c.consumer.start()
     for i in range(3, 6):

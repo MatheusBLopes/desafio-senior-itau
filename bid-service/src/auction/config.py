@@ -5,20 +5,24 @@ from dataclasses import dataclass, field
 
 
 def _env(name: str, default: str) -> str:
+    """Variável de ambiente, ou o padrão se ela não existir."""
     return os.environ.get(name, default)
 
 
 def _bool(name: str, default: bool) -> bool:
+    """Variável de ambiente booleana: 1, true ou yes (sem diferenciar maiúsculas) é verdadeiro."""
     return _env(name, str(default)).lower() in ("1", "true", "yes")
 
 
 @dataclass(frozen=True)
 class RateLimitConfig:
+    """Limites dos token buckets por usuário (Valkey) e por IP (memória da task)."""
+
     # Por usuário, no Valkey (vale entre todas as tasks).
     enabled: bool = True
     capacity: int = 20
     refill_per_second: float = 10
-    # Por IP de origem, na memória de cada task (ClientIpRateLimiter).
+    # Por IP de origem, na memória de cada task (IpRateLimiter).
     per_ip_enabled: bool = True
     per_ip_capacity: int = 200
     per_ip_refill_per_second: float = 50
@@ -26,6 +30,8 @@ class RateLimitConfig:
 
 @dataclass(frozen=True)
 class Settings:
+    """Toda a configuração da task. Os padrões servem para o ambiente local; from_env lê o ambiente."""
+
     db_dsn: str = "postgresql://auction:auction@localhost:5432/auction"
     db_pool_size: int = 10
     redis_host: str = "localhost"
@@ -53,7 +59,6 @@ class Settings:
     consumer_batch_size: int = 500
     consumer_claim_min_idle_ms: int = 30_000
     # Varredura completa dos streams: pega avisos perdidos do Pub/Sub, reivindica pendentes e mede o backlog.
-    # Varredura completa dos streams: pega avisos perdidos do Pub/Sub, reivindica pendentes e mede o backlog.
     consumer_maintenance_interval_s: float = 5
 
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
@@ -73,6 +78,7 @@ class Settings:
 
     @staticmethod
     def from_env() -> "Settings":
+        """Monta a configuração a partir das variáveis de ambiente (os nomes estão no Terraform e no Compose)."""
         return Settings(
             db_dsn=_env("DB_DSN", "postgresql://{user}:{password}@{host}:{port}/{name}".format(
                 user=_env("DB_USER", "auction"), password=_env("DB_PASSWORD", "auction"),

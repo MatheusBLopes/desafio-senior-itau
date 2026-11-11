@@ -5,11 +5,13 @@ import time
 import uuid
 from dataclasses import replace
 
-from auction import common
-from auction.bids import BidRepository, BidService, RateLimiter
+from auction.bidding.rate_limit import UserRateLimiter
+from auction.bidding.service import BidService
 from auction.config import RateLimitConfig
-from auction.persistence import BidPersister, BidStreamConsumer
-from auction.observability import PERSIST_CONFLICTS
+from auction.observability.metrics import PERSIST_CONFLICTS
+from auction.persistence.persister import BidPersister
+from auction.persistence.stream_consumer import BidStreamConsumer
+from auction.storage import keys
 
 from .conftest import count, eventually, key, new_auction
 
@@ -22,7 +24,7 @@ async def test_accepted_bid_that_collides_in_postgres_is_quarantined_instead_of_
     before = PERSIST_CONFLICTS._value.get()
 
     # A key some com o leilão aberto (TTL antigo de 24 h): o Valkey aceita de novo, o UNIQUE recusa.
-    await c.redis.delete(common.idempotency_key(aid, "ana", k))
+    await c.redis.delete(keys.idempotency_key(aid, "ana", k))
     again = await c.bids.place(aid, "ana", k, 11_000)
     assert again.seq == 2
 
@@ -51,7 +53,7 @@ async def test_valkey_behind_postgres_catches_up_instead_of_reusing_seqs(server)
     await eventually(await persisted(3), 10)
 
     # Failover para uma réplica que não recebeu os dois últimos lances.
-    await c.redis.hset(common.auction_key(aid), mapping={"seq": "1", "currentPrice": "10000", "leaderId": "ana"})
+    await c.redis.hset(keys.auction_key(aid), mapping={"seq": "1", "currentPrice": "10000", "leaderId": "ana"})
     await c.reconciler.reconcile()
 
     view = await c.auctions.get(aid)
@@ -66,7 +68,7 @@ async def test_orphan_entries_in_the_closing_queue_do_not_block_other_auctions(s
     # Ex.: Postgres restaurado de um backup anterior a esses leilões.
     c = server.c
     orphan = str(uuid.uuid4())
-    await c.redis.zadd(common.ENDING, {orphan: 0, "lixo": 0})
+    await c.redis.zadd(keys.ENDING, {orphan: 0, "lixo": 0})
     try:
         aid = await new_auction(c, 5)
         await c.bids.place(aid, "ana", key(), 10_000)
@@ -75,15 +77,15 @@ async def test_orphan_entries_in_the_closing_queue_do_not_block_other_auctions(s
             return await c.pool.fetchval("select status from auctions where id = $1", aid) == "CLOSED"
 
         await eventually(closed, 15)
-        assert await c.redis.zscore(common.ENDING, orphan) is None
-        assert await c.redis.zscore(common.ENDING, "lixo") is None
+        assert await c.redis.zscore(keys.ENDING, orphan) is None
+        assert await c.redis.zscore(keys.ENDING, "lixo") is None
     finally:
-        await c.redis.zrem(common.ENDING, orphan, "lixo")
+        await c.redis.zrem(keys.ENDING, orphan, "lixo")
 
 
 async def test_invalid_member_in_active_streams_does_not_stop_persistence(server):
     c = server.c
-    await c.redis.sadd(common.ACTIVE_STREAMS, "lixo")
+    await c.redis.sadd(keys.ACTIVE_STREAMS, "lixo")
     try:
         aid = await new_auction(c, 60)
         await c.bids.place(aid, "ana", key(), 10_000)
@@ -95,18 +97,18 @@ async def test_invalid_member_in_active_streams_does_not_stop_persistence(server
 
         # A entrada inválida é removida na próxima varredura completa.
         async def removed() -> bool:
-            return not await c.redis.sismember(common.ACTIVE_STREAMS, "lixo")
+            return not await c.redis.sismember(keys.ACTIVE_STREAMS, "lixo")
 
         await eventually(removed, 5)
     finally:
-        await c.redis.srem(common.ACTIVE_STREAMS, "lixo")
+        await c.redis.srem(keys.ACTIVE_STREAMS, "lixo")
 
 
 async def test_bids_keep_working_after_valkey_loses_its_script_cache(server):
     # Restart do Valkey sem FLUSHALL do estado (ex.: failover): o EVALSHA responde NOSCRIPT.
     c = server.c
-    bids = BidService(c.redis, c.scripts, c.loader, c.cache, RateLimiter(c.scripts, RateLimitConfig()),
-                      BidRepository(c.pool), c.metrics, c.settings)
+    bids = BidService(c.redis, c.scripts, c.loader, c.cache, UserRateLimiter(c.scripts, RateLimitConfig()),
+                      c.metrics, c.settings)
     aid = await new_auction(c, 60)
     await bids.place(aid, "ana", key(), 50_000)
     await eventually(lambda: (s := c.cache.get(aid)) is not None and s.seq == 1, 5)

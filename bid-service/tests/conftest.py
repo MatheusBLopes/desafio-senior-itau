@@ -15,8 +15,9 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
 
-from auction.app import Container, create_app
-from auction.auctions import CreateAuctionRequest
+from auction.app import create_app
+from auction.container import Container
+from auction.lifecycle.models import CreateAuctionRequest
 from auction.config import RateLimitConfig, Settings
 
 
@@ -72,7 +73,7 @@ async def server(containers) -> AsyncIterator[Server]:
     task = asyncio.create_task(uv.serve(sockets=[api, management]))
     while not uv.started:
         await asyncio.sleep(0.05)
-    yield Server(app.state.c, settings.port, settings.management_port)
+    yield Server(app.state.container, settings.port, settings.management_port)
     uv.should_exit = True
     await task
 
